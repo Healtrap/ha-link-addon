@@ -1,11 +1,6 @@
 name: build
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'ha_link/**'
-      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:

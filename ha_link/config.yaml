@@ -9,7 +9,7 @@ arch:
 startup: application
 boot: auto
 host_network: true
-image: ghcr.io/healtrap/ha-link-addon/ha_link-{arch}
+image: ghcr.io/healtrap/ha-link-addon/ha_link-{arch}:1b9d60b0eb527381128b483a9aebe7ae0e7a5dc4
 map:
   - config:rw
   - share:rw
