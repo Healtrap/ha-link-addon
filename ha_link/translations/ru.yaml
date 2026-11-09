@@ -1,0 +1,16 @@
+configuration:
+  config_url:
+    name: Адрес конфигурации
+    description: URL файла agent.json с актуальным адресом релея.
+  relay_token:
+    name: Токен релея
+    description: Токен FRP (тот же, что auth.token в frps.toml).
+  check_interval:
+    name: Интервал проверки (сек)
+    description: Как часто перечитывать agent.json. 0 — только при старте. Минимум 30.
+  files_token:
+    name: Токен доступа к файлам
+    description: Пароль для файлового менеджера и WebDAV. Пусто — файловый сервис выключен.
+  files_domain:
+    name: Домен файлов
+    description: Публичное имя файлового сервиса (должно указывать на VPS-релей).

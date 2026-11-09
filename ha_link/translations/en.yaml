@@ -1,0 +1,16 @@
+configuration:
+  config_url:
+    name: Endpoint URL
+    description: URL of agent.json with the current relay address.
+  relay_token:
+    name: Relay token
+    description: FRP auth token (same as auth.token in frps.toml).
+  check_interval:
+    name: Check interval (seconds)
+    description: How often to re-read agent.json. 0 = only at startup. Minimum 30.
+  files_token:
+    name: Files access token
+    description: Password for the remote file manager and WebDAV. Empty = file service disabled.
+  files_domain:
+    name: Files domain
+    description: Public host name for the file service (must point to the relay VPS).

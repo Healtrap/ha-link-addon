@@ -1,0 +1,29 @@
+name: HA Link
+version: "0.2.0"
+slug: ha_link
+description: Dynamic FRP client with endpoint discovery + remote file access
+url: https://virvinsky.ru/ha/
+arch:
+  - aarch64
+  - armv7
+  - amd64
+startup: application
+boot: auto
+host_network: true
+watchdog: true
+map:
+  - config:rw
+  - share:rw
+  - addons:rw
+options:
+  config_url: https://virvinsky.ru/ha/agent.json
+  relay_token: ""
+  check_interval: 300
+  files_token: ""
+  files_domain: files.virvinsky.ru
+schema:
+  config_url: str
+  relay_token: password
+  check_interval: int(0,86400)
+  files_token: password
+  files_domain: str
