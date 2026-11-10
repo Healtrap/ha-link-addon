@@ -1,5 +1,5 @@
 name: HA Link
-version: "0.2.2"
+version: "0.2.3"
 slug: ha_link
 description: Dynamic FRP client with endpoint discovery + remote file access
 url: https://virvinsky.ru/ha/
