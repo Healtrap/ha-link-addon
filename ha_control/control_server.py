@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-"""HA Control — веб-панель управления Home Assistant (v0.2.0).
+﻿#!/usr/bin/env python3
+"""HA Control â€” Ð²ÐµÐ±-Ð¿Ð°Ð½ÐµÐ»ÑŒ ÑƒÐ¿Ñ€Ð°Ð²Ð»ÐµÐ½Ð¸Ñ Home Assistant (v0.2.0).
 
-Работает только через ingress Supervisor (отдельного порта наружу нет).
-Права: hassio_api + hassio_role=admin — аддоны (установка/обновление/удаление),
-магазин, логи, бэкапы (создание/скачивание/удаление), рестарт HA и ребут хоста,
-файлы /config и /share. docker_api не используется.
+Ð Ð°Ð±Ð¾Ñ‚Ð°ÐµÑ‚ Ñ‚Ð¾Ð»ÑŒÐºÐ¾ Ñ‡ÐµÑ€ÐµÐ· ingress Supervisor (Ð¾Ñ‚Ð´ÐµÐ»ÑŒÐ½Ð¾Ð³Ð¾ Ð¿Ð¾Ñ€Ñ‚Ð° Ð½Ð°Ñ€ÑƒÐ¶Ñƒ Ð½ÐµÑ‚).
+ÐŸÑ€Ð°Ð²Ð°: hassio_api + hassio_role=admin â€” Ð°Ð´Ð´Ð¾Ð½Ñ‹ (ÑƒÑÑ‚Ð°Ð½Ð¾Ð²ÐºÐ°/Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ/ÑƒÐ´Ð°Ð»ÐµÐ½Ð¸Ðµ),
+Ð¼Ð°Ð³Ð°Ð·Ð¸Ð½, Ð»Ð¾Ð³Ð¸, Ð±ÑÐºÐ°Ð¿Ñ‹ (ÑÐ¾Ð·Ð´Ð°Ð½Ð¸Ðµ/ÑÐºÐ°Ñ‡Ð¸Ð²Ð°Ð½Ð¸Ðµ/ÑƒÐ´Ð°Ð»ÐµÐ½Ð¸Ðµ), Ñ€ÐµÑÑ‚Ð°Ñ€Ñ‚ HA Ð¸ Ñ€ÐµÐ±ÑƒÑ‚ Ñ…Ð¾ÑÑ‚Ð°,
+Ñ„Ð°Ð¹Ð»Ñ‹ /config Ð¸ /share. docker_api Ð½Ðµ Ð¸ÑÐ¿Ð¾Ð»ÑŒÐ·ÑƒÐµÑ‚ÑÑ.
 """
 
 import json
@@ -17,7 +17,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -28,7 +28,7 @@ HOST_ACTIONS = {"reboot", "shutdown"}
 SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 FILE_ROOTS = tuple(x for x in os.environ.get(
     "CONTROL_FILE_ROOTS",
-    "/config|/share|/media|/ssl|/backup|/addon_configs|/local_apps").split("|") if x)
+    "/config|/share|/media|/ssl|/backup|/app_configs|/local_apps|/addon_configs").split("|") if x)
 MAX_WRITE = 4 * 1024 * 1024
 MAX_UPLOAD = 2 * 1024 * 1024 * 1024
 CHUNK = 64 * 1024
@@ -37,7 +37,7 @@ CHUNK = 64 * 1024
 # --- Supervisor API --------------------------------------------------------
 
 def supervisor(path, method="GET", payload=None, timeout=60, raw=False):
-    """Возвращает (status, data). data — dict/list для JSON, bytes для raw, иначе str."""
+    """Ð’Ð¾Ð·Ð²Ñ€Ð°Ñ‰Ð°ÐµÑ‚ (status, data). data â€” dict/list Ð´Ð»Ñ JSON, bytes Ð´Ð»Ñ raw, Ð¸Ð½Ð°Ñ‡Ðµ str."""
     headers = {"Authorization": "Bearer %s" % TOKEN}
     data = None
     if payload is not None:
@@ -107,7 +107,7 @@ def temperature():
 
 
 def _items(status, data, key):
-    """Достаёт список из ответа Supervisor, понимая обе формы: list и {key: list}."""
+    """Ð”Ð¾ÑÑ‚Ð°Ñ‘Ñ‚ ÑÐ¿Ð¸ÑÐ¾Ðº Ð¸Ð· Ð¾Ñ‚Ð²ÐµÑ‚Ð° Supervisor, Ð¿Ð¾Ð½Ð¸Ð¼Ð°Ñ Ð¾Ð±Ðµ Ñ„Ð¾Ñ€Ð¼Ñ‹: list Ð¸ {key: list}."""
     if status != 200 or not isinstance(data, dict):
         return None
     payload = data.get("data")
@@ -171,7 +171,7 @@ def collect_state():
     repos = []
     status, data = supervisor("/store/repositories", timeout=20)
     items = _items(status, data, "repositories")
-    if items is None:  # старые версии: /store
+    if items is None:  # ÑÑ‚Ð°Ñ€Ñ‹Ðµ Ð²ÐµÑ€ÑÐ¸Ð¸: /store
         status2, data2 = supervisor("/store", timeout=30)
         items = _items(status2, data2, "repositories")
     if items is None:
@@ -195,19 +195,19 @@ def collect_state():
         state["loadavg"] = [round(x, 2) for x in os.getloadavg()]
     except Exception:
         state["loadavg"] = []
-    state["file_roots"] = list(FILE_ROOTS)
+    state["file_roots"] = [r for r in FILE_ROOTS if os.path.isdir(r)] or list(FILE_ROOTS)
     return state
 
 
 # --- files -----------------------------------------------------------------
 
 def safe_path(raw):
-    """Путь внутри разрешённых корней. Возвращает (real, err)."""
+    """ÐŸÑƒÑ‚ÑŒ Ð²Ð½ÑƒÑ‚Ñ€Ð¸ Ñ€Ð°Ð·Ñ€ÐµÑˆÑ‘Ð½Ð½Ñ‹Ñ… ÐºÐ¾Ñ€Ð½ÐµÐ¹. Ð’Ð¾Ð·Ð²Ñ€Ð°Ñ‰Ð°ÐµÑ‚ (real, err)."""
     if not raw:
-        return None, "пустой путь"
+        return None, "Ð¿ÑƒÑÑ‚Ð¾Ð¹ Ð¿ÑƒÑ‚ÑŒ"
     full = os.path.realpath(raw)
     if not any(full == root or full.startswith(root + os.sep) for root in FILE_ROOTS):
-        return None, "путь вне разрешённых каталогов"
+        return None, "Ð¿ÑƒÑ‚ÑŒ Ð²Ð½Ðµ Ñ€Ð°Ð·Ñ€ÐµÑˆÑ‘Ð½Ð½Ñ‹Ñ… ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³Ð¾Ð²"
     return full, None
 
 
@@ -216,7 +216,7 @@ def file_listing(path):
     if err:
         return None, err
     if not os.path.isdir(real):
-        return None, "не каталог"
+        return None, "Ð½Ðµ ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³"
     items = []
     try:
         for name in sorted(os.listdir(real), key=lambda s: s.lower()):
@@ -229,7 +229,7 @@ def file_listing(path):
             except OSError:
                 continue
     except PermissionError:
-        return None, "нет доступа"
+        return None, "Ð½ÐµÑ‚ Ð´Ð¾ÑÑ‚ÑƒÐ¿Ð°"
     parent = os.path.dirname(real)
     if not any(parent == r or parent.startswith(r + os.sep) for r in FILE_ROOTS):
         parent = None
@@ -241,12 +241,12 @@ def file_read(path, limit=512 * 1024):
     if err:
         return None, err
     if not os.path.isfile(real):
-        return None, "не файл"
+        return None, "Ð½Ðµ Ñ„Ð°Ð¹Ð»"
     size = os.path.getsize(real)
     with open(real, "rb") as fh:
         chunk = fh.read(limit)
     if b"\x00" in chunk[:4096]:
-        return None, "бинарный файл (%d байт)" % size
+        return None, "Ð±Ð¸Ð½Ð°Ñ€Ð½Ñ‹Ð¹ Ñ„Ð°Ð¹Ð» (%d Ð±Ð°Ð¹Ñ‚)" % size
     return {"path": real, "size": size, "content": chunk.decode("utf-8", "replace")}, None
 
 
@@ -255,7 +255,7 @@ def file_write(path, content):
     if err:
         return err
     if os.path.isdir(real):
-        return "это каталог"
+        return "ÑÑ‚Ð¾ ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³"
     os.makedirs(os.path.dirname(real) or "/", exist_ok=True)
     if os.path.exists(real):
         shutil.copy2(real, real + ".bak")
@@ -269,7 +269,7 @@ def file_delete(path):
     if err:
         return err
     if real in FILE_ROOTS:
-        return "нельзя удалить корень"
+        return "Ð½ÐµÐ»ÑŒÐ·Ñ ÑƒÐ´Ð°Ð»Ð¸Ñ‚ÑŒ ÐºÐ¾Ñ€ÐµÐ½ÑŒ"
     if os.path.isdir(real):
         shutil.rmtree(real)
     else:
@@ -291,32 +291,32 @@ def file_rename(path, name):
         return err
     name = (name or "").strip()
     if not name or "/" in name or "\\" in name or name in (".", ".."):
-        return "некорректное имя"
+        return "Ð½ÐµÐºÐ¾Ñ€Ñ€ÐµÐºÑ‚Ð½Ð¾Ðµ Ð¸Ð¼Ñ"
     dest = os.path.join(os.path.dirname(real), name)
     dest_real, err = safe_path(dest)
     if err:
         return err
     if os.path.exists(dest_real):
-        return "такое имя уже существует"
+        return "Ñ‚Ð°ÐºÐ¾Ðµ Ð¸Ð¼Ñ ÑƒÐ¶Ðµ ÑÑƒÑ‰ÐµÑÑ‚Ð²ÑƒÐµÑ‚"
     os.rename(real, dest_real)
     return None
 
 
 def file_upload(dir_path, name, length, stream):
-    """Пишет поток в файл потоково, без загрузки в память."""
+    """ÐŸÐ¸ÑˆÐµÑ‚ Ð¿Ð¾Ñ‚Ð¾Ðº Ð² Ñ„Ð°Ð¹Ð» Ð¿Ð¾Ñ‚Ð¾ÐºÐ¾Ð²Ð¾, Ð±ÐµÐ· Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ¸ Ð² Ð¿Ð°Ð¼ÑÑ‚ÑŒ."""
     real, err = safe_path(dir_path)
     if err:
         return None, err
     if not os.path.isdir(real):
-        return None, "не каталог"
+        return None, "Ð½Ðµ ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³"
     name = (name or "").strip()
     if not name or "/" in name or "\\" in name or name in (".", ".."):
-        return None, "некорректное имя файла"
+        return None, "Ð½ÐµÐºÐ¾Ñ€Ñ€ÐµÐºÑ‚Ð½Ð¾Ðµ Ð¸Ð¼Ñ Ñ„Ð°Ð¹Ð»Ð°"
     dest, err = safe_path(os.path.join(real, name))
     if err:
         return None, err
     if os.path.isdir(dest):
-        return None, "это каталог"
+        return None, "ÑÑ‚Ð¾ ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³"
     if os.path.exists(dest):
         shutil.copy2(dest, dest + ".bak")
     remaining = length
@@ -331,7 +331,7 @@ def file_upload(dir_path, name, length, stream):
                 remaining -= len(chunk)
         if remaining:
             os.remove(tmp)
-            return None, "оборванная загрузка (не хватило %d байт)" % remaining
+            return None, "Ð¾Ð±Ð¾Ñ€Ð²Ð°Ð½Ð½Ð°Ñ Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ° (Ð½Ðµ Ñ…Ð²Ð°Ñ‚Ð¸Ð»Ð¾ %d Ð±Ð°Ð¹Ñ‚)" % remaining
         os.replace(tmp, dest)
     except Exception as exc:
         try:
@@ -421,73 +421,73 @@ PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <div><h1>HA Control</h1><div class="sub" id="sub">загрузка…</div></div>
+  <div><h1>HA Control</h1><div class="sub" id="sub">Ð·Ð°Ð³Ñ€ÑƒÐ·ÐºÐ°â€¦</div></div>
   <div style="display:flex;gap:6px;flex-wrap:wrap">
-    <button class="btn" onclick="load()">Обновить</button>
-    <button class="btn warn" onclick="coreAct('restart')">Рестарт HA</button>
+    <button class="btn" onclick="load()">ÐžÐ±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ</button>
+    <button class="btn warn" onclick="coreAct('restart')">Ð ÐµÑÑ‚Ð°Ñ€Ñ‚ HA</button>
   </div>
 </header>
 <nav>
-  <button data-tab="apps" class="active">Аддоны</button>
-  <button data-tab="store">Магазин</button>
-  <button data-tab="files">Файлы</button>
-  <button data-tab="logs">Логи</button>
-  <button data-tab="backups">Бэкапы</button>
-  <button data-tab="system">Система</button>
+  <button data-tab="apps" class="active">ÐÐ´Ð´Ð¾Ð½Ñ‹</button>
+  <button data-tab="store">ÐœÐ°Ð³Ð°Ð·Ð¸Ð½</button>
+  <button data-tab="files">Ð¤Ð°Ð¹Ð»Ñ‹</button>
+  <button data-tab="logs">Ð›Ð¾Ð³Ð¸</button>
+  <button data-tab="backups">Ð‘ÑÐºÐ°Ð¿Ñ‹</button>
+  <button data-tab="system">Ð¡Ð¸ÑÑ‚ÐµÐ¼Ð°</button>
 </nav>
 <main>
   <section id="tab-apps">
-    <p class="hint">Установленные аддоны. «Стоп» и «Рестарт» применяются сразу, удаление — с подтверждением.</p>
+    <p class="hint">Ð£ÑÑ‚Ð°Ð½Ð¾Ð²Ð»ÐµÐ½Ð½Ñ‹Ðµ Ð°Ð´Ð´Ð¾Ð½Ñ‹. Â«Ð¡Ñ‚Ð¾Ð¿Â» Ð¸ Â«Ð ÐµÑÑ‚Ð°Ñ€Ñ‚Â» Ð¿Ñ€Ð¸Ð¼ÐµÐ½ÑÑŽÑ‚ÑÑ ÑÑ€Ð°Ð·Ñƒ, ÑƒÐ´Ð°Ð»ÐµÐ½Ð¸Ðµ â€” Ñ Ð¿Ð¾Ð´Ñ‚Ð²ÐµÑ€Ð¶Ð´ÐµÐ½Ð¸ÐµÐ¼.</p>
     <div class="grid" id="apps"></div>
   </section>
 
   <section id="tab-store" style="display:none">
     <div class="card" style="margin-bottom:12px">
-      <div class="row"><h3>Репозитории</h3><button class="btn" onclick="storeReload()">Перезагрузить магазин</button></div>
+      <div class="row"><h3>Ð ÐµÐ¿Ð¾Ð·Ð¸Ñ‚Ð¾Ñ€Ð¸Ð¸</h3><button class="btn" onclick="storeReload()">ÐŸÐµÑ€ÐµÐ·Ð°Ð³Ñ€ÑƒÐ·Ð¸Ñ‚ÑŒ Ð¼Ð°Ð³Ð°Ð·Ð¸Ð½</button></div>
       <div id="repos" style="margin-top:10px"></div>
       <div class="row" style="margin-top:12px">
         <input type="text" id="repo-url" placeholder="https://github.com/user/repo">
-        <button class="btn primary" onclick="repoAdd()">Добавить</button>
+        <button class="btn primary" onclick="repoAdd()">Ð”Ð¾Ð±Ð°Ð²Ð¸Ñ‚ÑŒ</button>
       </div>
-      <div class="muted" style="margin-top:8px">После добавления нажми «Перезагрузить магазин». Установка — на вкладке «Аддоны» (кнопка «Установить»).</div>
+      <div class="muted" style="margin-top:8px">ÐŸÐ¾ÑÐ»Ðµ Ð´Ð¾Ð±Ð°Ð²Ð»ÐµÐ½Ð¸Ñ Ð½Ð°Ð¶Ð¼Ð¸ Â«ÐŸÐµÑ€ÐµÐ·Ð°Ð³Ñ€ÑƒÐ·Ð¸Ñ‚ÑŒ Ð¼Ð°Ð³Ð°Ð·Ð¸Ð½Â». Ð£ÑÑ‚Ð°Ð½Ð¾Ð²ÐºÐ° â€” Ð½Ð° Ð²ÐºÐ»Ð°Ð´ÐºÐµ Â«ÐÐ´Ð´Ð¾Ð½Ñ‹Â» (ÐºÐ½Ð¾Ð¿ÐºÐ° Â«Ð£ÑÑ‚Ð°Ð½Ð¾Ð²Ð¸Ñ‚ÑŒÂ»).</div>
     </div>
     <div class="card"><table id="store-apps"><tbody></tbody></table></div>
   </section>
 
   <section id="tab-files" style="display:none">
-    <p class="hint">Все каталоги HA: <b>/config</b>, <b>/share</b>, <b>/media</b>, <b>/ssl</b>,
-      <b>/backup</b>, <b>/addon_configs</b>, <b>/local_apps</b>. При перезаписи создаётся копия <code>.bak</code>.</p>
+    <p class="hint">Ð’ÑÐµ ÐºÐ°Ñ‚Ð°Ð»Ð¾Ð³Ð¸ HA: <b>/config</b>, <b>/share</b>, <b>/media</b>, <b>/ssl</b>,
+      <b>/backup</b>, <b>/addon_configs</b>, <b>/local_apps</b>. ÐŸÑ€Ð¸ Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿Ð¸ÑÐ¸ ÑÐ¾Ð·Ð´Ð°Ñ‘Ñ‚ÑÑ ÐºÐ¾Ð¿Ð¸Ñ <code>.bak</code>.</p>
     <div class="files">
       <div class="card">
         <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
           <b id="fpath" style="font-size:12px;word-break:break-all">/config</b>
           <span style="display:flex;gap:6px">
-            <button class="btn" onclick="fup()">Вверх</button>
-            <button class="btn primary" onclick="document.getElementById('fupload').click()">Загрузить</button>
+            <button class="btn" onclick="fup()">Ð’Ð²ÐµÑ€Ñ…</button>
+            <button class="btn primary" onclick="document.getElementById('fupload').click()">Ð—Ð°Ð³Ñ€ÑƒÐ·Ð¸Ñ‚ÑŒ</button>
             <input type="file" id="fupload" multiple style="display:none">
           </span>
         </div>
         <div class="roots" id="froots"></div>
         <div class="flist" id="flist"></div>
         <div class="row" style="margin-top:10px;gap:6px">
-          <input type="text" id="fnew" placeholder="имя_файла.yaml">
-          <button class="btn" onclick="fnewFile()">+ файл</button>
-          <button class="btn" onclick="fnewDir()">+ папка</button>
+          <input type="text" id="fnew" placeholder="Ð¸Ð¼Ñ_Ñ„Ð°Ð¹Ð»Ð°.yaml">
+          <button class="btn" onclick="fnewFile()">+ Ñ„Ð°Ð¹Ð»</button>
+          <button class="btn" onclick="fnewDir()">+ Ð¿Ð°Ð¿ÐºÐ°</button>
         </div>
       </div>
       <div class="card">
         <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
-          <b id="fname" style="font-size:12px;word-break:break-all">файл не выбран</b>
+          <b id="fname" style="font-size:12px;word-break:break-all">Ñ„Ð°Ð¹Ð» Ð½Ðµ Ð²Ñ‹Ð±Ñ€Ð°Ð½</b>
           <span style="display:flex;gap:6px;flex-wrap:wrap">
-            <a class="btn" id="fdl" style="display:none;text-decoration:none">Скачать</a>
-            <button class="btn" onclick="frename()">Переименовать</button>
-            <button class="btn primary" onclick="fsave()">Сохранить</button>
+            <a class="btn" id="fdl" style="display:none;text-decoration:none">Ð¡ÐºÐ°Ñ‡Ð°Ñ‚ÑŒ</a>
+            <button class="btn" onclick="frename()">ÐŸÐµÑ€ÐµÐ¸Ð¼ÐµÐ½Ð¾Ð²Ð°Ñ‚ÑŒ</button>
+            <button class="btn primary" onclick="fsave()">Ð¡Ð¾Ñ…Ñ€Ð°Ð½Ð¸Ñ‚ÑŒ</button>
           </span>
         </div>
-        <textarea id="fcontent" spellcheck="false" placeholder="Выбери файл слева"></textarea>
+        <textarea id="fcontent" spellcheck="false" placeholder="Ð’Ñ‹Ð±ÐµÑ€Ð¸ Ñ„Ð°Ð¹Ð» ÑÐ»ÐµÐ²Ð°"></textarea>
         <div class="row" style="margin-top:10px">
           <span class="muted" id="fmeta"></span>
-          <button class="btn danger" onclick="fdel()">Удалить</button>
+          <button class="btn danger" onclick="fdel()">Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ</button>
         </div>
       </div>
     </div>
@@ -497,17 +497,17 @@ PAGE = r"""<!DOCTYPE html>
     <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
       <select id="logsrc" style="max-width:320px"></select>
       <span style="display:flex;gap:6px">
-        <button class="btn primary" onclick="showLogs()">Показать</button>
-        <button class="btn" onclick="toggleFollow()" id="followbtn">Автообновление: выкл</button>
+        <button class="btn primary" onclick="showLogs()">ÐŸÐ¾ÐºÐ°Ð·Ð°Ñ‚ÑŒ</button>
+        <button class="btn" onclick="toggleFollow()" id="followbtn">ÐÐ²Ñ‚Ð¾Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ: Ð²Ñ‹ÐºÐ»</button>
       </span>
     </div>
-    <div class="card"><pre id="logbody" style="max-height:70vh">Выбери источник и нажми «Показать».</pre></div>
+    <div class="card"><pre id="logbody" style="max-height:70vh">Ð’Ñ‹Ð±ÐµÑ€Ð¸ Ð¸ÑÑ‚Ð¾Ñ‡Ð½Ð¸Ðº Ð¸ Ð½Ð°Ð¶Ð¼Ð¸ Â«ÐŸÐ¾ÐºÐ°Ð·Ð°Ñ‚ÑŒÂ».</pre></div>
   </section>
 
   <section id="tab-backups" style="display:none">
     <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
-      <p class="hint" style="margin:0">Полный бэкап создаётся на малине 1–3 минуты.</p>
-      <button class="btn primary" onclick="mkBackup()">Создать полный бэкап</button>
+      <p class="hint" style="margin:0">ÐŸÐ¾Ð»Ð½Ñ‹Ð¹ Ð±ÑÐºÐ°Ð¿ ÑÐ¾Ð·Ð´Ð°Ñ‘Ñ‚ÑÑ Ð½Ð° Ð¼Ð°Ð»Ð¸Ð½Ðµ 1â€“3 Ð¼Ð¸Ð½ÑƒÑ‚Ñ‹.</p>
+      <button class="btn primary" onclick="mkBackup()">Ð¡Ð¾Ð·Ð´Ð°Ñ‚ÑŒ Ð¿Ð¾Ð»Ð½Ñ‹Ð¹ Ð±ÑÐºÐ°Ð¿</button>
     </div>
     <div class="card"><table id="backups"><tbody></tbody></table></div>
   </section>
@@ -515,11 +515,11 @@ PAGE = r"""<!DOCTYPE html>
   <section id="tab-system" style="display:none">
     <div class="grid" id="system"></div>
     <div class="card danger-zone" style="margin-top:12px">
-      <h3>Опасная зона</h3>
-      <div class="muted">Действия выполняются на хосте. Туннель <code>ha_link</code> при ребуте поднимется сам (boot: auto).</div>
+      <h3>ÐžÐ¿Ð°ÑÐ½Ð°Ñ Ð·Ð¾Ð½Ð°</h3>
+      <div class="muted">Ð”ÐµÐ¹ÑÑ‚Ð²Ð¸Ñ Ð²Ñ‹Ð¿Ð¾Ð»Ð½ÑÑŽÑ‚ÑÑ Ð½Ð° Ñ…Ð¾ÑÑ‚Ðµ. Ð¢ÑƒÐ½Ð½ÐµÐ»ÑŒ <code>ha_link</code> Ð¿Ñ€Ð¸ Ñ€ÐµÐ±ÑƒÑ‚Ðµ Ð¿Ð¾Ð´Ð½Ð¸Ð¼ÐµÑ‚ÑÑ ÑÐ°Ð¼ (boot: auto).</div>
       <div class="actions">
-        <button class="btn warn" onclick="hostAct('reboot')">Перезагрузить хост</button>
-        <button class="btn danger" onclick="hostAct('shutdown')">Выключить хост</button>
+        <button class="btn warn" onclick="hostAct('reboot')">ÐŸÐµÑ€ÐµÐ·Ð°Ð³Ñ€ÑƒÐ·Ð¸Ñ‚ÑŒ Ñ…Ð¾ÑÑ‚</button>
+        <button class="btn danger" onclick="hostAct('shutdown')">Ð’Ñ‹ÐºÐ»ÑŽÑ‡Ð¸Ñ‚ÑŒ Ñ…Ð¾ÑÑ‚</button>
       </div>
     </div>
   </section>
@@ -527,9 +527,9 @@ PAGE = r"""<!DOCTYPE html>
 
 <div class="modal" id="modal">
   <div class="box">
-    <div class="head"><b id="modal-title">Логи</b>
-      <button class="btn" onclick="closeModal()">Закрыть</button></div>
-    <pre id="modal-body">…</pre>
+    <div class="head"><b id="modal-title">Ð›Ð¾Ð³Ð¸</b>
+      <button class="btn" onclick="closeModal()">Ð—Ð°ÐºÑ€Ñ‹Ñ‚ÑŒ</button></div>
+    <pre id="modal-body">â€¦</pre>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -545,7 +545,7 @@ function toast(msg, isErr){
 }
 function badge(state){
   const s = ['started','stopped','error'].includes(state) ? state : 'unknown';
-  const label = {started:'работает', stopped:'остановлен', error:'ошибка', unknown:'неизвестно'}[s];
+  const label = {started:'Ñ€Ð°Ð±Ð¾Ñ‚Ð°ÐµÑ‚', stopped:'Ð¾ÑÑ‚Ð°Ð½Ð¾Ð²Ð»ÐµÐ½', error:'Ð¾ÑˆÐ¸Ð±ÐºÐ°', unknown:'Ð½ÐµÐ¸Ð·Ð²ÐµÑÑ‚Ð½Ð¾'}[s];
   return '<span class="badge ' + s + '">' + label + '</span>';
 }
 function bar(pct){
@@ -553,7 +553,7 @@ function bar(pct){
   return '<div class="bar ' + c + '"><i style="width:' + Math.min(100, pct) + '%"></i></div>';
 }
 function fmtDate(s){ try { return new Date(s).toLocaleString('ru-RU'); } catch(e){ return s; } }
-function fmtSize(b){ return b > 1048576 ? (b/1048576).toFixed(1)+' МБ' : Math.max(1, Math.round(b/1024))+' КБ'; }
+function fmtSize(b){ return b > 1048576 ? (b/1048576).toFixed(1)+' ÐœÐ‘' : Math.max(1, Math.round(b/1024))+' ÐšÐ‘'; }
 
 async function api(path, opts){
   const r = await fetch(BASE + path, Object.assign({cache:'no-store'}, opts || {}));
@@ -567,23 +567,23 @@ function renderApps(){
   const box = document.getElementById('apps');
   box.innerHTML = (STATE.addons||[]).map(a => {
     const upd = a.update_available && a.version_latest
-      ? '<div class="muted" style="color:#e0a13a;margin-top:6px">Доступно обновление: ' + esc(a.version_latest) + '</div>' : '';
+      ? '<div class="muted" style="color:#e0a13a;margin-top:6px">Ð”Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ: ' + esc(a.version_latest) + '</div>' : '';
     const btns = [];
     if (a.state === 'started') {
-      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'stop\')">Стоп</button>');
-      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'restart\')">Рестарт</button>');
+      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'stop\')">Ð¡Ñ‚Ð¾Ð¿</button>');
+      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'restart\')">Ð ÐµÑÑ‚Ð°Ñ€Ñ‚</button>');
     } else {
-      btns.push('<button class="btn primary" onclick="appAct(\'' + a.slug + '\',\'start\')">Запустить</button>');
+      btns.push('<button class="btn primary" onclick="appAct(\'' + a.slug + '\',\'start\')">Ð—Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ</button>');
     }
-    if (a.update_available) btns.push('<button class="btn warn" onclick="appAct(\'' + a.slug + '\',\'update\')">Обновить</button>');
-    btns.push('<button class="btn" onclick="openLogs(\'' + a.slug + '\')">Логи</button>');
-    btns.push('<button class="btn danger" onclick="appAct(\'' + a.slug + '\',\'uninstall\')">Удалить</button>');
+    if (a.update_available) btns.push('<button class="btn warn" onclick="appAct(\'' + a.slug + '\',\'update\')">ÐžÐ±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ</button>');
+    btns.push('<button class="btn" onclick="openLogs(\'' + a.slug + '\')">Ð›Ð¾Ð³Ð¸</button>');
+    btns.push('<button class="btn danger" onclick="appAct(\'' + a.slug + '\',\'uninstall\')">Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ</button>');
     return '<div class="card">' +
       '<div class="row"><h3>' + esc(a.name) + '</h3>' + badge(a.state) + '</div>' +
-      '<div class="muted">' + esc(a.slug) + ' · v' + esc(a.version) + ' · boot: ' + esc(a.boot) + '</div>' +
+      '<div class="muted">' + esc(a.slug) + ' Â· v' + esc(a.version) + ' Â· boot: ' + esc(a.boot) + '</div>' +
       upd +
       '<div class="actions">' + btns.join('') + '</div></div>';
-  }).join('') || '<div class="card muted">Нет установленных аддонов</div>';
+  }).join('') || '<div class="card muted">ÐÐµÑ‚ ÑƒÑÑ‚Ð°Ð½Ð¾Ð²Ð»ÐµÐ½Ð½Ñ‹Ñ… Ð°Ð´Ð´Ð¾Ð½Ð¾Ð²</div>';
 }
 
 function renderSystem(){
@@ -591,32 +591,32 @@ function renderSystem(){
   const memPct = m.total_mb ? Math.round(100*m.used_mb/m.total_mb) : 0;
   const diskPct = h.disk_total ? Math.round(100*h.disk_used/h.disk_total) : 0;
   const swapPct = m.swap_total_mb ? Math.round(100*m.swap_used_mb/m.swap_total_mb) : 0;
-  const temp = STATE.temp_c != null ? STATE.temp_c + ' °C' : '—';
+  const temp = STATE.temp_c != null ? STATE.temp_c + ' Â°C' : 'â€”';
   document.getElementById('system').innerHTML =
-    '<div class="card"><h3>Хост</h3><div class="muted">' + esc(h.operating_system||'—') + '</div>' +
-      '<div class="muted">' + esc(h.hostname||'') + ' · ' + esc(h.kernel||'') + '</div>' +
-      '<div class="muted">температура CPU: ' + temp + '</div>' +
-      '<div class="muted">' + esc(h.timezone||'') + ' · uptime: ' + (h.startup_time!=null?Math.round(h.startup_time)+' с':'—') + '</div></div>' +
-    '<div class="card"><h3>Память</h3><div class="muted">' + (m.used_mb||0) + ' / ' + (m.total_mb||0) + ' МБ (' + memPct + '%)</div>' + bar(memPct) +
-      '<div class="muted" style="margin-top:8px">swap: ' + (m.swap_used_mb||0) + ' / ' + (m.swap_total_mb||0) + ' МБ (' + swapPct + '%)</div>' + bar(swapPct) + '</div>' +
-    '<div class="card"><h3>Диск</h3><div class="muted">' + (h.disk_used||0) + ' / ' + (h.disk_total||0) + ' ГБ (' + diskPct + '%)</div>' + bar(diskPct) +
-      '<div class="muted" style="margin-top:8px">свободно: ' + (h.disk_free||0) + ' ГБ</div></div>' +
-    '<div class="card"><h3>Supervisor</h3><div class="muted">v' + esc(s.version||'—') + ' · ' + esc(s.channel||'') + ' · ' + esc(s.arch||'') + '</div>' +
-      '<div class="muted">healthy: ' + (s.healthy?'да':'нет') + ' · supported: ' + (s.supported?'да':'нет') + '</div></div>' +
-    '<div class="card"><h3>Home Assistant</h3><div class="muted">v' + esc(c.version||'—') + ' · ' + esc(c.machine||'') + '</div>' +
-      (c.update_available?'<div class="muted" style="color:#e0a13a">доступно обновление</div>':'') +
-      '<div class="actions"><button class="btn warn" onclick="coreAct(\'update\')">Обновить HA</button></div></div>' +
-    '<div class="card"><h3>Нагрузка</h3><div class="muted">' + ((STATE.loadavg||[]).join('  ') || '—') + '</div></div>';
+    '<div class="card"><h3>Ð¥Ð¾ÑÑ‚</h3><div class="muted">' + esc(h.operating_system||'â€”') + '</div>' +
+      '<div class="muted">' + esc(h.hostname||'') + ' Â· ' + esc(h.kernel||'') + '</div>' +
+      '<div class="muted">Ñ‚ÐµÐ¼Ð¿ÐµÑ€Ð°Ñ‚ÑƒÑ€Ð° CPU: ' + temp + '</div>' +
+      '<div class="muted">' + esc(h.timezone||'') + ' Â· uptime: ' + (h.startup_time!=null?Math.round(h.startup_time)+' Ñ':'â€”') + '</div></div>' +
+    '<div class="card"><h3>ÐŸÐ°Ð¼ÑÑ‚ÑŒ</h3><div class="muted">' + (m.used_mb||0) + ' / ' + (m.total_mb||0) + ' ÐœÐ‘ (' + memPct + '%)</div>' + bar(memPct) +
+      '<div class="muted" style="margin-top:8px">swap: ' + (m.swap_used_mb||0) + ' / ' + (m.swap_total_mb||0) + ' ÐœÐ‘ (' + swapPct + '%)</div>' + bar(swapPct) + '</div>' +
+    '<div class="card"><h3>Ð”Ð¸ÑÐº</h3><div class="muted">' + (h.disk_used||0) + ' / ' + (h.disk_total||0) + ' Ð“Ð‘ (' + diskPct + '%)</div>' + bar(diskPct) +
+      '<div class="muted" style="margin-top:8px">ÑÐ²Ð¾Ð±Ð¾Ð´Ð½Ð¾: ' + (h.disk_free||0) + ' Ð“Ð‘</div></div>' +
+    '<div class="card"><h3>Supervisor</h3><div class="muted">v' + esc(s.version||'â€”') + ' Â· ' + esc(s.channel||'') + ' Â· ' + esc(s.arch||'') + '</div>' +
+      '<div class="muted">healthy: ' + (s.healthy?'Ð´Ð°':'Ð½ÐµÑ‚') + ' Â· supported: ' + (s.supported?'Ð´Ð°':'Ð½ÐµÑ‚') + '</div></div>' +
+    '<div class="card"><h3>Home Assistant</h3><div class="muted">v' + esc(c.version||'â€”') + ' Â· ' + esc(c.machine||'') + '</div>' +
+      (c.update_available?'<div class="muted" style="color:#e0a13a">Ð´Ð¾ÑÑ‚ÑƒÐ¿Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ</div>':'') +
+      '<div class="actions"><button class="btn warn" onclick="coreAct(\'update\')">ÐžÐ±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ HA</button></div></div>' +
+    '<div class="card"><h3>ÐÐ°Ð³Ñ€ÑƒÐ·ÐºÐ°</h3><div class="muted">' + ((STATE.loadavg||[]).join('  ') || 'â€”') + '</div></div>';
 }
 
 function renderBackups(){
   const tb = document.querySelector('#backups tbody');
-  tb.innerHTML = '<tr><th>Имя</th><th>Дата</th><th>Тип</th><th>Размер</th><th></th></tr>' +
+  tb.innerHTML = '<tr><th>Ð˜Ð¼Ñ</th><th>Ð”Ð°Ñ‚Ð°</th><th>Ð¢Ð¸Ð¿</th><th>Ð Ð°Ð·Ð¼ÐµÑ€</th><th></th></tr>' +
     ((STATE.backups||[]).map(b =>
-      '<tr><td>' + esc(b.name) + '</td><td>' + esc(fmtDate(b.date)) + '</td><td>' + esc(b.type) + '</td><td>' + esc(b.size_mb) + ' МБ</td>' +
-      '<td style="white-space:nowrap"><a class="btn" style="text-decoration:none" href="' + BASE + 'api/backups/' + encodeURIComponent(b.slug) + '/download">Скачать</a> ' +
-      '<button class="btn danger bdel" data-slug="' + esc(b.slug) + '" data-name="' + esc(b.name) + '">Удалить</button></td></tr>'
-    ).join('') || '<tr><td colspan="5" class="muted">Бэкапов нет</td></tr>');
+      '<tr><td>' + esc(b.name) + '</td><td>' + esc(fmtDate(b.date)) + '</td><td>' + esc(b.type) + '</td><td>' + esc(b.size_mb) + ' ÐœÐ‘</td>' +
+      '<td style="white-space:nowrap"><a class="btn" style="text-decoration:none" href="' + BASE + 'api/backups/' + encodeURIComponent(b.slug) + '/download">Ð¡ÐºÐ°Ñ‡Ð°Ñ‚ÑŒ</a> ' +
+      '<button class="btn danger bdel" data-slug="' + esc(b.slug) + '" data-name="' + esc(b.name) + '">Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ</button></td></tr>'
+    ).join('') || '<tr><td colspan="5" class="muted">Ð‘ÑÐºÐ°Ð¿Ð¾Ð² Ð½ÐµÑ‚</td></tr>');
   tb.querySelectorAll('.bdel').forEach(el => {
     el.onclick = () => delBackup(el.dataset.slug, el.dataset.name);
   });
@@ -626,8 +626,8 @@ function renderRepos(){
   document.getElementById('repos').innerHTML = (STATE.repositories||[]).map(r =>
     '<div class="row" style="padding:6px 0;border-bottom:1px solid #232838">' +
     '<div><b>' + esc(r.name||r.slug) + '</b><div class="muted">' + esc(r.url||r.slug) + '</div></div>' +
-    '<button class="btn danger" onclick="repoDel(\'' + esc(r.slug) + '\')">Удалить</button></div>'
-  ).join('') || '<div class="muted">Нет репозиториев</div>';
+    '<button class="btn danger" onclick="repoDel(\'' + esc(r.slug) + '\')">Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ</button></div>'
+  ).join('') || '<div class="muted">ÐÐµÑ‚ Ñ€ÐµÐ¿Ð¾Ð·Ð¸Ñ‚Ð¾Ñ€Ð¸ÐµÐ²</div>';
 
   const sel = document.getElementById('logsrc');
   const opts = ['<option value="core">HA Core</option>', '<option value="supervisor">Supervisor</option>']
@@ -640,81 +640,81 @@ function renderRepos(){
 function render(){
   const s = STATE.supervisor||{}, c = STATE.core||{}, h = STATE.host||{};
   document.getElementById('sub').textContent =
-    'HA ' + (c.version||'?') + ' · Supervisor ' + (s.version||'?') + ' · ' + (h.operating_system||'') +
-    ' · панель v' + (STATE.version||'?') +
-    ((STATE.errors&&STATE.errors.length) ? ' · ошибки: ' + STATE.errors.join(', ') : '');
+    'HA ' + (c.version||'?') + ' Â· Supervisor ' + (s.version||'?') + ' Â· ' + (h.operating_system||'') +
+    ' Â· Ð¿Ð°Ð½ÐµÐ»ÑŒ v' + (STATE.version||'?') +
+    ((STATE.errors&&STATE.errors.length) ? ' Â· Ð¾ÑˆÐ¸Ð±ÐºÐ¸: ' + STATE.errors.join(', ') : '');
   renderApps(); renderSystem(); renderBackups(); renderRepos(); renderRoots();
 }
 
 async function load(){
   try { STATE = await api('api/state'); render(); }
-  catch(e){ toast('Не удалось получить состояние: ' + e.message, true); }
+  catch(e){ toast('ÐÐµ ÑƒÐ´Ð°Ð»Ð¾ÑÑŒ Ð¿Ð¾Ð»ÑƒÑ‡Ð¸Ñ‚ÑŒ ÑÐ¾ÑÑ‚Ð¾ÑÐ½Ð¸Ðµ: ' + e.message, true); }
 }
 
 async function appAct(slug, action){
-  const names = {stop:'остановить', restart:'перезапустить', start:'запустить', update:'обновить', uninstall:'УДАЛИТЬ'};
-  if (action !== 'start' && !confirm('Точно ' + names[action] + ' ' + slug + '?')) return;
-  if (action === 'uninstall' && !confirm('Удаление необратимо. Продолжить?')) return;
-  toast('Выполняю: ' + names[action] + '…');
-  try { await api('api/apps/' + encodeURIComponent(slug) + '/' + action, {method:'POST'}); toast('Готово: ' + names[action]); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  const names = {stop:'Ð¾ÑÑ‚Ð°Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ', restart:'Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ', start:'Ð·Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ', update:'Ð¾Ð±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ', uninstall:'Ð£Ð”ÐÐ›Ð˜Ð¢Ð¬'};
+  if (action !== 'start' && !confirm('Ð¢Ð¾Ñ‡Ð½Ð¾ ' + names[action] + ' ' + slug + '?')) return;
+  if (action === 'uninstall' && !confirm('Ð£Ð´Ð°Ð»ÐµÐ½Ð¸Ðµ Ð½ÐµÐ¾Ð±Ñ€Ð°Ñ‚Ð¸Ð¼Ð¾. ÐŸÑ€Ð¾Ð´Ð¾Ð»Ð¶Ð¸Ñ‚ÑŒ?')) return;
+  toast('Ð’Ñ‹Ð¿Ð¾Ð»Ð½ÑÑŽ: ' + names[action] + 'â€¦');
+  try { await api('api/apps/' + encodeURIComponent(slug) + '/' + action, {method:'POST'}); toast('Ð“Ð¾Ñ‚Ð¾Ð²Ð¾: ' + names[action]); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   setTimeout(load, 1500);
 }
 
 async function coreAct(action){
-  const label = {restart:'перезапустить Home Assistant', start:'запустить', stop:'ОСТАНОВИТЬ', update:'обновить Home Assistant'}[action];
-  if (!confirm('Точно ' + label + '?')) return;
-  toast('Выполняю…');
-  try { await api('api/system/core/' + action, {method:'POST'}); toast('Команда принята'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  const label = {restart:'Ð¿ÐµÑ€ÐµÐ·Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ Home Assistant', start:'Ð·Ð°Ð¿ÑƒÑÑ‚Ð¸Ñ‚ÑŒ', stop:'ÐžÐ¡Ð¢ÐÐÐžÐ’Ð˜Ð¢Ð¬', update:'Ð¾Ð±Ð½Ð¾Ð²Ð¸Ñ‚ÑŒ Home Assistant'}[action];
+  if (!confirm('Ð¢Ð¾Ñ‡Ð½Ð¾ ' + label + '?')) return;
+  toast('Ð’Ñ‹Ð¿Ð¾Ð»Ð½ÑÑŽâ€¦');
+  try { await api('api/system/core/' + action, {method:'POST'}); toast('ÐšÐ¾Ð¼Ð°Ð½Ð´Ð° Ð¿Ñ€Ð¸Ð½ÑÑ‚Ð°'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   setTimeout(load, 3000);
 }
 
 async function hostAct(action){
-  const label = action === 'reboot' ? 'ПЕРЕЗАГРУЗИТЬ' : 'ВЫКЛЮЧИТЬ';
-  if (!confirm('Реально ' + label + ' хост?')) return;
-  if (!confirm('Последнее подтверждение: ' + label + '?')) return;
-  toast('Отправляю команду…');
-  try { await api('api/system/host/' + action, {method:'POST'}); toast('Команда отправлена, связь прервётся'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  const label = action === 'reboot' ? 'ÐŸÐ•Ð Ð•Ð—ÐÐ“Ð Ð£Ð—Ð˜Ð¢Ð¬' : 'Ð’Ð«ÐšÐ›Ð®Ð§Ð˜Ð¢Ð¬';
+  if (!confirm('Ð ÐµÐ°Ð»ÑŒÐ½Ð¾ ' + label + ' Ñ…Ð¾ÑÑ‚?')) return;
+  if (!confirm('ÐŸÐ¾ÑÐ»ÐµÐ´Ð½ÐµÐµ Ð¿Ð¾Ð´Ñ‚Ð²ÐµÑ€Ð¶Ð´ÐµÐ½Ð¸Ðµ: ' + label + '?')) return;
+  toast('ÐžÑ‚Ð¿Ñ€Ð°Ð²Ð»ÑÑŽ ÐºÐ¾Ð¼Ð°Ð½Ð´Ñƒâ€¦');
+  try { await api('api/system/host/' + action, {method:'POST'}); toast('ÐšÐ¾Ð¼Ð°Ð½Ð´Ð° Ð¾Ñ‚Ð¿Ñ€Ð°Ð²Ð»ÐµÐ½Ð°, ÑÐ²ÑÐ·ÑŒ Ð¿Ñ€ÐµÑ€Ð²Ñ‘Ñ‚ÑÑ'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 
 async function storeReload(){
-  toast('Перезагружаю магазин (до минуты)…');
-  try { await api('api/store/reload', {method:'POST', setTimeout:0}); toast('Магазин обновлён'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  toast('ÐŸÐµÑ€ÐµÐ·Ð°Ð³Ñ€ÑƒÐ¶Ð°ÑŽ Ð¼Ð°Ð³Ð°Ð·Ð¸Ð½ (Ð´Ð¾ Ð¼Ð¸Ð½ÑƒÑ‚Ñ‹)â€¦');
+  try { await api('api/store/reload', {method:'POST', setTimeout:0}); toast('ÐœÐ°Ð³Ð°Ð·Ð¸Ð½ Ð¾Ð±Ð½Ð¾Ð²Ð»Ñ‘Ð½'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   load();
 }
 async function repoAdd(){
   const url = document.getElementById('repo-url').value.trim();
   if (!url) return;
-  try { await api('api/store/repos', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})}); toast('Репозиторий добавлен'); document.getElementById('repo-url').value=''; }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  try { await api('api/store/repos', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})}); toast('Ð ÐµÐ¿Ð¾Ð·Ð¸Ñ‚Ð¾Ñ€Ð¸Ð¹ Ð´Ð¾Ð±Ð°Ð²Ð»ÐµÐ½'); document.getElementById('repo-url').value=''; }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   load();
 }
 async function repoDel(slug){
-  if (!confirm('Удалить репозиторий ' + slug + '? Аддоны из него останутся установленными.')) return;
-  try { await api('api/store/repos/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Удалён'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  if (!confirm('Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ Ñ€ÐµÐ¿Ð¾Ð·Ð¸Ñ‚Ð¾Ñ€Ð¸Ð¹ ' + slug + '? ÐÐ´Ð´Ð¾Ð½Ñ‹ Ð¸Ð· Ð½ÐµÐ³Ð¾ Ð¾ÑÑ‚Ð°Ð½ÑƒÑ‚ÑÑ ÑƒÑÑ‚Ð°Ð½Ð¾Ð²Ð»ÐµÐ½Ð½Ñ‹Ð¼Ð¸.')) return;
+  try { await api('api/store/repos/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Ð£Ð´Ð°Ð»Ñ‘Ð½'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   load();
 }
 
 async function mkBackup(){
-  if (!confirm('Создать полный бэкап? 1–3 минуты.')) return;
-  toast('Создаю бэкап…');
+  if (!confirm('Ð¡Ð¾Ð·Ð´Ð°Ñ‚ÑŒ Ð¿Ð¾Ð»Ð½Ñ‹Ð¹ Ð±ÑÐºÐ°Ð¿? 1â€“3 Ð¼Ð¸Ð½ÑƒÑ‚Ñ‹.')) return;
+  toast('Ð¡Ð¾Ð·Ð´Ð°ÑŽ Ð±ÑÐºÐ°Ð¿â€¦');
   try { await api('api/backups', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name:'manual_' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')})}); toast('Бэкап создан'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+      body: JSON.stringify({name:'manual_' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')})}); toast('Ð‘ÑÐºÐ°Ð¿ ÑÐ¾Ð·Ð´Ð°Ð½'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   load();
 }
 async function delBackup(slug, name){
-  if (!confirm('Удалить бэкап «' + name + '»?')) return;
-  try { await api('api/backups/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Удалён'); }
-  catch(e){ toast('Ошибка: ' + e.message, true); }
+  if (!confirm('Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ Ð±ÑÐºÐ°Ð¿ Â«' + name + 'Â»?')) return;
+  try { await api('api/backups/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Ð£Ð´Ð°Ð»Ñ‘Ð½'); }
+  catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
   load();
 }
 
-/* --- логи --- */
+/* --- Ð»Ð¾Ð³Ð¸ --- */
 async function openLogs(slug){
   document.getElementById('logsrc').value = slug;
   document.querySelector('nav button[data-tab=logs]').click();
@@ -725,17 +725,17 @@ async function showLogs(){
   const body = document.getElementById('logbody');
   try {
     const t = await api('api/logs?source=' + encodeURIComponent(src) + '&lines=300');
-    body.textContent = t || '(пусто)';
+    body.textContent = t || '(Ð¿ÑƒÑÑ‚Ð¾)';
     body.scrollTop = body.scrollHeight;
-  } catch(e){ body.textContent = 'Ошибка: ' + e.message; }
+  } catch(e){ body.textContent = 'ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message; }
 }
 function toggleFollow(){
   const b = document.getElementById('followbtn');
-  if (FOLLOW) { clearInterval(FOLLOW); FOLLOW = null; b.textContent = 'Автообновление: выкл'; }
-  else { FOLLOW = setInterval(showLogs, 5000); b.textContent = 'Автообновление: вкл'; }
+  if (FOLLOW) { clearInterval(FOLLOW); FOLLOW = null; b.textContent = 'ÐÐ²Ñ‚Ð¾Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ: Ð²Ñ‹ÐºÐ»'; }
+  else { FOLLOW = setInterval(showLogs, 5000); b.textContent = 'ÐÐ²Ñ‚Ð¾Ð¾Ð±Ð½Ð¾Ð²Ð»ÐµÐ½Ð¸Ðµ: Ð²ÐºÐ»'; }
 }
 
-/* --- файлы --- */
+/* --- Ñ„Ð°Ð¹Ð»Ñ‹ --- */
 function renderRoots(){
   const box = document.getElementById('froots');
   box.innerHTML = (STATE.file_roots||[]).map(r =>
@@ -749,14 +749,14 @@ async function fload(path){
     document.getElementById('fpath').textContent = d.path;
     document.getElementById('flist').innerHTML = d.items.map(it =>
       '<div class="fitem" data-path="' + esc(d.path + '/' + it.name) + '" data-dir="' + (it.dir ? '1' : '0') + '">' +
-      '<span>' + (it.dir ? '📁 ' : '📄 ') + esc(it.name) + '</span>' +
+      '<span>' + (it.dir ? 'ðŸ“ ' : 'ðŸ“„ ') + esc(it.name) + '</span>' +
       '<span class="muted">' + (it.dir ? '' : fmtSize(it.size)) + '</span></div>'
-    ).join('') || '<div class="muted">пусто</div>';
+    ).join('') || '<div class="muted">Ð¿ÑƒÑÑ‚Ð¾</div>';
     document.querySelectorAll('#flist .fitem').forEach(el => {
       el.onclick = () => el.dataset.dir === '1' ? fload(el.dataset.path) : fopen(el.dataset.path);
     });
     window._fparent = d.parent;
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 function fup(){ if (window._fparent) fload(window._fparent); }
 async function fopen(path){
@@ -765,19 +765,19 @@ async function fopen(path){
     CURFILE = d.path;
     document.getElementById('fname').textContent = d.path;
     document.getElementById('fcontent').value = d.content;
-    document.getElementById('fmeta').textContent = fmtSize(d.size) + (d.size > 512*1024 ? ' (показаны первые 512 КБ)' : '');
+    document.getElementById('fmeta').textContent = fmtSize(d.size) + (d.size > 512*1024 ? ' (Ð¿Ð¾ÐºÐ°Ð·Ð°Ð½Ñ‹ Ð¿ÐµÑ€Ð²Ñ‹Ðµ 512 ÐšÐ‘)' : '');
     const dl = document.getElementById('fdl');
     dl.href = BASE + 'api/files/download?path=' + encodeURIComponent(d.path);
     dl.style.display = '';
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function fsave(){
-  if (!CURFILE) return toast('Файл не выбран', true);
+  if (!CURFILE) return toast('Ð¤Ð°Ð¹Ð» Ð½Ðµ Ð²Ñ‹Ð±Ñ€Ð°Ð½', true);
   try {
     await api('api/files/write', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({path: CURFILE, content: document.getElementById('fcontent').value})});
-    toast('Сохранено (старая версия — .bak)');
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+    toast('Ð¡Ð¾Ñ…Ñ€Ð°Ð½ÐµÐ½Ð¾ (ÑÑ‚Ð°Ñ€Ð°Ñ Ð²ÐµÑ€ÑÐ¸Ñ â€” .bak)');
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function fnewFile(){
   const name = document.getElementById('fnew').value.trim();
@@ -788,51 +788,51 @@ async function fnewFile(){
       body: JSON.stringify({path: p, content: ''})});
     document.getElementById('fnew').value = '';
     fload(CURDIR); fopen(p);
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function fnewDir(){
-  const name = prompt('Имя новой папки:');
+  const name = prompt('Ð˜Ð¼Ñ Ð½Ð¾Ð²Ð¾Ð¹ Ð¿Ð°Ð¿ÐºÐ¸:');
   if (!name) return;
   try {
     await api('api/files/mkdir', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({path: CURDIR.replace(/\/$/,'') + '/' + name})});
-    toast('Папка создана'); fload(CURDIR);
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+    toast('ÐŸÐ°Ð¿ÐºÐ° ÑÐ¾Ð·Ð´Ð°Ð½Ð°'); fload(CURDIR);
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function frename(){
-  if (!CURFILE) return toast('Файл не выбран', true);
-  const name = prompt('Новое имя:', CURFILE.split('/').pop());
+  if (!CURFILE) return toast('Ð¤Ð°Ð¹Ð» Ð½Ðµ Ð²Ñ‹Ð±Ñ€Ð°Ð½', true);
+  const name = prompt('ÐÐ¾Ð²Ð¾Ðµ Ð¸Ð¼Ñ:', CURFILE.split('/').pop());
   if (!name) return;
   try {
     await api('api/files/rename', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({path: CURFILE, name: name})});
-    toast('Переименовано'); fload(CURDIR); fopen(CURDIR.replace(/\/$/,'') + '/' + name);
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+    toast('ÐŸÐµÑ€ÐµÐ¸Ð¼ÐµÐ½Ð¾Ð²Ð°Ð½Ð¾'); fload(CURDIR); fopen(CURDIR.replace(/\/$/,'') + '/' + name);
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function fdel(){
-  if (!CURFILE) return toast('Файл не выбран', true);
-  if (!confirm('Удалить ' + CURFILE + '?')) return;
+  if (!CURFILE) return toast('Ð¤Ð°Ð¹Ð» Ð½Ðµ Ð²Ñ‹Ð±Ñ€Ð°Ð½', true);
+  if (!confirm('Ð£Ð´Ð°Ð»Ð¸Ñ‚ÑŒ ' + CURFILE + '?')) return;
   try {
     await api('api/files?path=' + encodeURIComponent(CURFILE), {method:'DELETE'});
-    toast('Удалён'); CURFILE = null;
-    document.getElementById('fname').textContent = 'файл не выбран';
+    toast('Ð£Ð´Ð°Ð»Ñ‘Ð½'); CURFILE = null;
+    document.getElementById('fname').textContent = 'Ñ„Ð°Ð¹Ð» Ð½Ðµ Ð²Ñ‹Ð±Ñ€Ð°Ð½';
     document.getElementById('fcontent').value = '';
     document.getElementById('fmeta').textContent = '';
     document.getElementById('fdl').style.display = 'none';
     fload(CURDIR);
-  } catch(e){ toast('Ошибка: ' + e.message, true); }
+  } catch(e){ toast('ÐžÑˆÐ¸Ð±ÐºÐ°: ' + e.message, true); }
 }
 async function fuploadFiles(files, dir){
   for (const f of files) {
-    toast('Загружаю ' + f.name + ' (' + fmtSize(f.size) + ')…');
+    toast('Ð—Ð°Ð³Ñ€ÑƒÐ¶Ð°ÑŽ ' + f.name + ' (' + fmtSize(f.size) + ')â€¦');
     try {
       const r = await fetch(BASE + 'api/files/upload?path=' + encodeURIComponent(dir) +
                             '&name=' + encodeURIComponent(f.name),
                             {method:'POST', body:f, headers:{'Content-Type':'application/octet-stream'}});
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
-      toast('Загружен: ' + f.name);
-    } catch(e) { toast('Ошибка ' + f.name + ': ' + e.message, true); break; }
+      toast('Ð—Ð°Ð³Ñ€ÑƒÐ¶ÐµÐ½: ' + f.name);
+    } catch(e) { toast('ÐžÑˆÐ¸Ð±ÐºÐ° ' + f.name + ': ' + e.message, true); break; }
   }
   fload(dir);
 }
@@ -989,7 +989,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             real, err = safe_path(qs.get("path", [""])[0])
             if err or not os.path.isfile(real):
-                return self._json(400, {"error": err or "не файл"})
+                return self._json(400, {"error": err or "Ð½Ðµ Ñ„Ð°Ð¹Ð»"})
             size = os.path.getsize(real)
             name = os.path.basename(real)
             self.send_response(200)
@@ -1017,7 +1017,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self._path()
 
-        # Загрузка файла: тело запроса — сырые байты, поэтому обрабатываем до _body()
+        # Ð—Ð°Ð³Ñ€ÑƒÐ·ÐºÐ° Ñ„Ð°Ð¹Ð»Ð°: Ñ‚ÐµÐ»Ð¾ Ð·Ð°Ð¿Ñ€Ð¾ÑÐ° â€” ÑÑ‹Ñ€Ñ‹Ðµ Ð±Ð°Ð¹Ñ‚Ñ‹, Ð¿Ð¾ÑÑ‚Ð¾Ð¼Ñƒ Ð¾Ð±Ñ€Ð°Ð±Ð°Ñ‚Ñ‹Ð²Ð°ÐµÐ¼ Ð´Ð¾ _body()
         if path == "/api/files/upload":
             qs = parse_qs(urlparse(self.path).query)
             try:
@@ -1025,9 +1025,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 length = 0
             if length <= 0:
-                return self._json(400, {"error": "пустой файл"})
+                return self._json(400, {"error": "Ð¿ÑƒÑÑ‚Ð¾Ð¹ Ñ„Ð°Ð¹Ð»"})
             if length > MAX_UPLOAD:
-                return self._json(413, {"error": "файл больше %d МБ" % (MAX_UPLOAD // 1048576)})
+                return self._json(413, {"error": "Ñ„Ð°Ð¹Ð» Ð±Ð¾Ð»ÑŒÑˆÐµ %d ÐœÐ‘" % (MAX_UPLOAD // 1048576)})
             dest, err = file_upload(qs.get("path", [""])[0],
                                     qs.get("name", [""])[0], length, self.rfile)
             if err:
@@ -1062,7 +1062,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/store/repos":
             url = str(body.get("url") or "").strip()
             if not url.startswith(("http://", "https://")):
-                return self._json(400, {"error": "нужен http(s)-URL"})
+                return self._json(400, {"error": "Ð½ÑƒÐ¶ÐµÐ½ http(s)-URL"})
             status, data = supervisor("/store/repositories", method="POST",
                                       payload={"repository": url}, timeout=600)
             if status != 200:
@@ -1129,7 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
 # --- startup ---------------------------------------------------------------
 
 def ensure_settings():
-    """Включает панель в сайдбаре и watchdog: оба флага живут в apps.json, по умолчанию off."""
+    """Ð’ÐºÐ»ÑŽÑ‡Ð°ÐµÑ‚ Ð¿Ð°Ð½ÐµÐ»ÑŒ Ð² ÑÐ°Ð¹Ð´Ð±Ð°Ñ€Ðµ Ð¸ watchdog: Ð¾Ð±Ð° Ñ„Ð»Ð°Ð³Ð° Ð¶Ð¸Ð²ÑƒÑ‚ Ð² apps.json, Ð¿Ð¾ ÑƒÐ¼Ð¾Ð»Ñ‡Ð°Ð½Ð¸ÑŽ off."""
     status, data = supervisor("/addons/self/info", timeout=20)
     if status != 200 or not isinstance(data, dict):
         return
@@ -1143,7 +1143,7 @@ def ensure_settings():
         return
     status, data = supervisor("/addons/self/options", method="POST", payload=body, timeout=60)
     if status == 200:
-        print("включено: %s (панель в меню / watchdog)" % ", ".join(sorted(body)), flush=True)
+        print("Ð²ÐºÐ»ÑŽÑ‡ÐµÐ½Ð¾: %s (Ð¿Ð°Ð½ÐµÐ»ÑŒ Ð² Ð¼ÐµÐ½ÑŽ / watchdog)" % ", ".join(sorted(body)), flush=True)
     else:
         print("ensure_settings: %s -> %s" % (body, _msg(data)), flush=True)
 
@@ -1155,7 +1155,7 @@ def main():
     except Exception:
         pass
     if not TOKEN:
-        print("FATAL: SUPERVISOR_TOKEN не задан (нужен hassio_api: true)", flush=True)
+        print("FATAL: SUPERVISOR_TOKEN Ð½Ðµ Ð·Ð°Ð´Ð°Ð½ (Ð½ÑƒÐ¶ÐµÐ½ hassio_api: true)", flush=True)
         sys.exit(1)
     try:
         ensure_settings()
