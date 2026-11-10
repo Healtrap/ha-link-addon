@@ -1,7 +1,7 @@
 name: HA Control
-version: "0.1.0"
+version: "0.2.0"
 slug: ha_control
-description: Web control panel for Home Assistant apps, logs, backups and system
+description: Remote panel - apps, store, logs, backups, files, host control
 url: https://github.com/Healtrap/ha-link-addon
 arch:
   - aarch64
@@ -10,11 +10,21 @@ startup: application
 boot: auto
 ingress: true
 ingress_port: 8099
+ingress_stream: true
 panel_icon: mdi:tune-variant
 panel_title: HA Control
 panel_admin: true
+watchdog: http://[HOST]:[PORT:8099]/api/health
 hassio_api: true
-hassio_role: manager
+hassio_role: admin
+map:
+  - type: homeassistant_config
+    read_only: false
+    path: /config
+  - type: share
+    read_only: false
+  - type: ssl
+    read_only: true
 image: ghcr.io/healtrap/ha-link-addon/ha_control-{arch}
 options: {}
 schema: {}

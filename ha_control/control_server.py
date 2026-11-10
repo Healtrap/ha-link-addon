@@ -1,32 +1,40 @@
 #!/usr/bin/env python3
-"""HA Control — веб-панель управления Home Assistant.
+"""HA Control — веб-панель управления Home Assistant (v0.2.0).
 
 Работает только через ingress Supervisor (отдельного порта наружу нет).
-Права: hassio_api (role=manager) — список аддонов, старт/стоп/рестарт,
-логи, бэкапы, сведения о хосте. Никаких docker-операций в этой версии.
+Права: hassio_api + hassio_role=admin — аддоны (установка/обновление/удаление),
+магазин, логи, бэкапы (создание/скачивание/удаление), рестарт HA и ребут хоста,
+файлы /config и /share. docker_api не используется.
 """
 
 import json
 import os
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
-ACTIONS = {"start", "stop", "restart"}
-SLUG_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+APP_ACTIONS = {"start", "stop", "restart", "update", "uninstall", "install"}
+CORE_ACTIONS = {"start", "stop", "restart", "update"}
+HOST_ACTIONS = {"reboot", "shutdown"}
+SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+FILE_ROOTS = tuple(x for x in os.environ.get(
+    "CONTROL_FILE_ROOTS", "/config|/share|/ssl").split("|") if x)
+MAX_WRITE = 4 * 1024 * 1024
 
 
 # --- Supervisor API --------------------------------------------------------
 
-def supervisor(path, method="GET", payload=None, timeout=60):
-    """Возвращает (status, data). data — dict/list для JSON, иначе str."""
+def supervisor(path, method="GET", payload=None, timeout=60, raw=False):
+    """Возвращает (status, data). data — dict/list для JSON, bytes для raw, иначе str."""
     headers = {"Authorization": "Bearer %s" % TOKEN}
     data = None
     if payload is not None:
@@ -35,28 +43,38 @@ def supervisor(path, method="GET", payload=None, timeout=60):
     req = urllib.request.Request(SUPERVISOR + path, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
+            body = resp.read()
+            if raw:
+                return resp.status, body
             ctype = resp.headers.get("Content-Type", "")
             if "json" in ctype:
                 try:
-                    return resp.status, json.loads(raw or b"{}")
+                    return resp.status, json.loads(body or b"{}")
                 except ValueError:
-                    return resp.status, {"raw": raw.decode("utf-8", "replace")}
-            return resp.status, raw.decode("utf-8", "replace")
+                    return resp.status, {"raw": body.decode("utf-8", "replace")}
+            return resp.status, body.decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
+        body = exc.read()
+        if raw:
+            return exc.code, body
         try:
-            return exc.code, json.loads(raw)
+            return exc.code, json.loads(body)
         except ValueError:
-            return exc.code, {"raw": raw}
-    except Exception as exc:  # сеть, таймаут, DNS
+            return exc.code, {"raw": body.decode("utf-8", "replace")}
+    except Exception as exc:
         return 0, {"error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+def _msg(data):
+    if isinstance(data, dict):
+        return str(data.get("message") or data.get("error") or data.get("raw") or "")[:300]
+    return str(data)[:300]
 
 
 def meminfo():
     vals = {}
     try:
-        with open("/proc/meminfo", "r") as fh:
+        with open("/proc/meminfo") as fh:
             for line in fh:
                 key, _, rest = line.partition(":")
                 vals[key.strip()] = int(rest.strip().split()[0])
@@ -75,36 +93,33 @@ def meminfo():
     }
 
 
+def temperature():
+    for path in ("/sys/class/thermal/thermal_zone0/temp", "/sys/devices/virtual/thermal/thermal_zone0/temp"):
+        try:
+            with open(path) as fh:
+                return round(int(fh.read().strip()) / 1000.0, 1)
+        except Exception:
+            continue
+    return None
+
+
 def collect_state():
     state = {"version": VERSION, "errors": []}
 
-    status, data = supervisor("/host/info")
-    if status == 200 and isinstance(data, dict):
-        state["host"] = data.get("data", {})
-    else:
-        state["host"] = {}
-        state["errors"].append("host/info: %s" % status)
-
-    status, data = supervisor("/supervisor/info")
-    if status == 200 and isinstance(data, dict):
-        state["supervisor"] = data.get("data", {})
-    else:
-        state["supervisor"] = {}
-        state["errors"].append("supervisor/info: %s" % status)
-
-    status, data = supervisor("/core/info")
-    if status == 200 and isinstance(data, dict):
-        state["core"] = data.get("data", {})
-    else:
-        state["core"] = {}
-        state["errors"].append("core/info: %s" % status)
+    for key, path in (("host", "/host/info"), ("supervisor", "/supervisor/info"), ("core", "/core/info")):
+        status, data = supervisor(path, timeout=20)
+        if status == 200 and isinstance(data, dict):
+            state[key] = data.get("data", {})
+        else:
+            state[key] = {}
+            state["errors"].append("%s: %s" % (path, status))
 
     addons = []
-    status, data = supervisor("/addons")
+    status, data = supervisor("/addons", timeout=30)
     if status == 200 and isinstance(data, dict):
         for item in (data.get("data", {}) or {}).get("addons", []):
             if not item.get("version"):
-                continue  # не установлен
+                continue
             addons.append({
                 "slug": item.get("slug", ""),
                 "name": item.get("name", item.get("slug", "")),
@@ -114,15 +129,14 @@ def collect_state():
                 "boot": item.get("boot", ""),
                 "update_available": bool(item.get("update_available")),
                 "description": item.get("description", ""),
-                "icon": bool(item.get("icon")),
             })
     else:
-        state["errors"].append("addons: %s" % status)
+        state["errors"].append("/addons: %s" % status)
     addons.sort(key=lambda a: a["name"].lower())
     state["addons"] = addons
 
     backups = []
-    status, data = supervisor("/backups")
+    status, data = supervisor("/backups", timeout=30)
     if status == 200 and isinstance(data, dict):
         for item in (data.get("data", {}) or {}).get("backups", []):
             backups.append({
@@ -133,11 +147,20 @@ def collect_state():
                 "size_mb": round((item.get("size_bytes") or 0) / 1048576, 1),
             })
     else:
-        state["errors"].append("backups: %s" % status)
+        state["errors"].append("/backups: %s" % status)
     backups.sort(key=lambda b: b["date"], reverse=True)
-    state["backups"] = backups[:12]
+    state["backups"] = backups[:15]
+
+    repos = []
+    status, data = supervisor("/store/repositories", timeout=20)
+    if status == 200 and isinstance(data, dict):
+        for item in (data.get("data", {}) or {}).get("repositories", []):
+            repos.append({"slug": item.get("slug", ""), "name": item.get("name", ""),
+                          "url": item.get("url", "")})
+    state["repositories"] = repos
 
     state["mem"] = meminfo()
+    state["temp_c"] = temperature()
     try:
         state["loadavg"] = [round(x, 2) for x in os.getloadavg()]
     except Exception:
@@ -145,7 +168,93 @@ def collect_state():
     return state
 
 
-# --- HTTP ------------------------------------------------------------------
+# --- files -----------------------------------------------------------------
+
+def safe_path(raw):
+    """Путь внутри разрешённых корней. Возвращает (real, err)."""
+    if not raw:
+        return None, "пустой путь"
+    full = os.path.realpath(raw)
+    if not any(full == root or full.startswith(root + os.sep) for root in FILE_ROOTS):
+        return None, "путь вне разрешённых каталогов"
+    return full, None
+
+
+def file_listing(path):
+    real, err = safe_path(path)
+    if err:
+        return None, err
+    if not os.path.isdir(real):
+        return None, "не каталог"
+    items = []
+    try:
+        for name in sorted(os.listdir(real), key=lambda s: s.lower()):
+            full = os.path.join(real, name)
+            try:
+                st = os.stat(full)
+                isdir = os.path.isdir(full)
+                items.append({"name": name, "dir": isdir, "size": 0 if isdir else st.st_size,
+                              "mtime": int(st.st_mtime)})
+            except OSError:
+                continue
+    except PermissionError:
+        return None, "нет доступа"
+    parent = os.path.dirname(real)
+    if not any(parent == r or parent.startswith(r + os.sep) for r in FILE_ROOTS):
+        parent = None
+    return {"path": real, "parent": parent, "items": items}, None
+
+
+def file_read(path, limit=512 * 1024):
+    real, err = safe_path(path)
+    if err:
+        return None, err
+    if not os.path.isfile(real):
+        return None, "не файл"
+    size = os.path.getsize(real)
+    with open(real, "rb") as fh:
+        chunk = fh.read(limit)
+    if b"\x00" in chunk[:4096]:
+        return None, "бинарный файл (%d байт)" % size
+    return {"path": real, "size": size, "content": chunk.decode("utf-8", "replace")}, None
+
+
+def file_write(path, content):
+    real, err = safe_path(path)
+    if err:
+        return err
+    if os.path.isdir(real):
+        return "это каталог"
+    os.makedirs(os.path.dirname(real) or "/", exist_ok=True)
+    if os.path.exists(real):
+        shutil.copy2(real, real + ".bak")
+    with open(real, "w", encoding="utf-8", newline="") as fh:
+        fh.write(content)
+    return None
+
+
+def file_delete(path):
+    real, err = safe_path(path)
+    if err:
+        return err
+    if real in FILE_ROOTS:
+        return "нельзя удалить корень"
+    if os.path.isdir(real):
+        shutil.rmtree(real)
+    else:
+        os.remove(real)
+    return None
+
+
+def file_mkdir(path):
+    real, err = safe_path(path)
+    if err:
+        return err
+    os.makedirs(real, exist_ok=True)
+    return None
+
+
+# --- UI --------------------------------------------------------------------
 
 PAGE = r"""<!DOCTYPE html>
 <html lang="ru">
@@ -158,15 +267,15 @@ PAGE = r"""<!DOCTYPE html>
   * { box-sizing: border-box; }
   body { margin:0; background:#111318; color:#e6e8ee;
          font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
-  header { padding:18px 20px 10px; }
+  header { padding:18px 20px 10px; display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }
   h1 { margin:0; font-size:20px; font-weight:600; letter-spacing:.2px; }
   .sub { color:#8b93a7; font-size:12px; margin-top:4px; }
-  nav { display:flex; gap:6px; padding:0 20px; border-bottom:1px solid #232838; }
-  nav button { background:none; border:0; color:#8b93a7; padding:10px 14px; cursor:pointer;
-               font-size:13px; border-bottom:2px solid transparent; }
+  nav { display:flex; gap:4px; padding:0 20px; border-bottom:1px solid #232838; overflow-x:auto; }
+  nav button { background:none; border:0; color:#8b93a7; padding:10px 12px; cursor:pointer;
+               font-size:13px; border-bottom:2px solid transparent; white-space:nowrap; }
   nav button.active { color:#e6e8ee; border-bottom-color:#3d8bfd; }
-  main { padding:18px 20px 40px; max-width:1100px; }
-  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); }
+  main { padding:18px 20px 60px; max-width:1180px; }
+  .grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(290px,1fr)); }
   .card { background:#171b23; border:1px solid #232838; border-radius:14px; padding:14px 16px; }
   .card h3 { margin:0 0 4px; font-size:14px; font-weight:600; }
   .muted { color:#8b93a7; font-size:12px; }
@@ -181,7 +290,7 @@ PAGE = r"""<!DOCTYPE html>
                padding:6px 11px; font-size:12px; cursor:pointer; }
   button.btn:hover { background:#2b3142; }
   button.btn.primary { background:#1f4fd8; border-color:#2f63f0; }
-  button.btn.primary:hover { background:#2a5be6; }
+  button.btn.warn { color:#ffc46b; }
   button.btn.danger { color:#ff9aa2; }
   button.btn:disabled { opacity:.45; cursor:default; }
   .bar { height:8px; background:#232838; border-radius:99px; overflow:hidden; margin-top:8px; }
@@ -189,51 +298,130 @@ PAGE = r"""<!DOCTYPE html>
   .bar.warn > i { background:#e0a13a; }
   .bar.crit > i { background:#e2565f; }
   table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:9px 8px; border-bottom:1px solid #232838; font-size:13px; }
+  th,td { text-align:left; padding:9px 8px; border-bottom:1px solid #232838; font-size:13px; vertical-align:top; }
   th { color:#8b93a7; font-weight:500; font-size:12px; }
-  .modal { position:fixed; inset:0; background:rgba(0,0,0,.65); display:none;
-           align-items:center; justify-content:center; padding:20px; z-index:50; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none;
+           align-items:center; justify-content:center; padding:16px; z-index:50; }
   .modal.open { display:flex; }
   .modal .box { background:#12151c; border:1px solid #232838; border-radius:14px;
-                width:100%; max-width:900px; max-height:85vh; display:flex; flex-direction:column; }
-  .modal .head { display:flex; justify-content:space-between; align-items:center;
+                width:100%; max-width:1000px; max-height:88vh; display:flex; flex-direction:column; }
+  .modal .head { display:flex; justify-content:space-between; align-items:center; gap:10px;
                  padding:12px 16px; border-bottom:1px solid #232838; }
   pre { margin:0; padding:14px 16px; overflow:auto; font:12px/1.5 ui-monospace,Consolas,monospace;
         color:#c8cede; white-space:pre-wrap; word-break:break-word; }
+  textarea { width:100%; min-height:220px; background:#0d1015; color:#c8cede; border:1px solid #232838;
+             border-radius:10px; padding:12px; font:12px/1.5 ui-monospace,Consolas,monospace; resize:vertical; }
+  input[type=text], select { background:#0d1015; color:#e6e8ee; border:1px solid #2f3648;
+             border-radius:9px; padding:7px 10px; font-size:13px; width:100%; }
   .toast { position:fixed; right:18px; bottom:18px; background:#232838; color:#e6e8ee;
            border:1px solid #2f3648; border-radius:10px; padding:10px 14px; font-size:13px;
-           opacity:0; transition:opacity .2s; pointer-events:none; max-width:380px; }
+           opacity:0; transition:opacity .2s; pointer-events:none; max-width:420px; z-index:60; }
   .toast.show { opacity:1; }
   .toast.err { background:#3a1a1d; border-color:#5c252a; color:#ffb3b9; }
-  .hint { color:#8b93a7; font-size:12px; margin:0 0 14px; }
+  .hint { color:#8b93a7; font-size:12px; margin:0 0 12px; }
+  .files { display:grid; grid-template-columns:minmax(260px,1fr) minmax(320px,1.6fr); gap:12px; }
+  @media (max-width:820px){ .files { grid-template-columns:1fr; } }
+  .flist { max-height:60vh; overflow:auto; }
+  .flist div { padding:6px 8px; border-radius:8px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  .flist div:hover { background:#1d2230; }
+  .danger-zone { border-color:#5c252a; }
 </style>
 </head>
 <body>
 <header>
-  <h1>HA Control</h1>
-  <div class="sub" id="sub">загрузка…</div>
+  <div><h1>HA Control</h1><div class="sub" id="sub">загрузка…</div></div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap">
+    <button class="btn" onclick="load()">Обновить</button>
+    <button class="btn warn" onclick="coreAct('restart')">Рестарт HA</button>
+  </div>
 </header>
 <nav>
   <button data-tab="apps" class="active">Аддоны</button>
-  <button data-tab="system">Система</button>
+  <button data-tab="store">Магазин</button>
+  <button data-tab="files">Файлы</button>
+  <button data-tab="logs">Логи</button>
   <button data-tab="backups">Бэкапы</button>
+  <button data-tab="system">Система</button>
 </nav>
 <main>
   <section id="tab-apps">
-    <p class="hint">Управление установленными аддонами. «Стоп» и «Рестарт» применяются сразу.</p>
+    <p class="hint">Установленные аддоны. «Стоп» и «Рестарт» применяются сразу, удаление — с подтверждением.</p>
     <div class="grid" id="apps"></div>
   </section>
-  <section id="tab-system" style="display:none">
-    <div class="grid" id="system"></div>
+
+  <section id="tab-store" style="display:none">
+    <div class="card" style="margin-bottom:12px">
+      <div class="row"><h3>Репозитории</h3><button class="btn" onclick="storeReload()">Перезагрузить магазин</button></div>
+      <div id="repos" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:12px">
+        <input type="text" id="repo-url" placeholder="https://github.com/user/repo">
+        <button class="btn primary" onclick="repoAdd()">Добавить</button>
+      </div>
+      <div class="muted" style="margin-top:8px">После добавления нажми «Перезагрузить магазин». Установка — на вкладке «Аддоны» (кнопка «Установить»).</div>
+    </div>
+    <div class="card"><table id="store-apps"><tbody></tbody></table></div>
   </section>
+
+  <section id="tab-files" style="display:none">
+    <p class="hint">Доступны <b>/config</b>, <b>/share</b>, <b>/ssl</b>. Перед сохранением создаётся копия <code>.bak</code>.</p>
+    <div class="files">
+      <div class="card">
+        <div class="row" style="margin-bottom:8px">
+          <b id="fpath" style="font-size:12px">/config</b>
+          <span><button class="btn" onclick="fup()">Вверх</button></span>
+        </div>
+        <div class="flist" id="flist"></div>
+        <div class="row" style="margin-top:10px">
+          <input type="text" id="fnew" placeholder="новый_файл.yaml">
+          <button class="btn" onclick="fnewFile()">Создать</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row" style="margin-bottom:8px">
+          <b id="fname" style="font-size:12px">файл не выбран</b>
+          <button class="btn primary" onclick="fsave()">Сохранить</button>
+        </div>
+        <textarea id="fcontent" spellcheck="false" placeholder="Выбери файл слева"></textarea>
+        <div class="row" style="margin-top:10px">
+          <span class="muted" id="fmeta"></span>
+          <button class="btn danger" onclick="fdel()">Удалить файл</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-logs" style="display:none">
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+      <select id="logsrc" style="max-width:320px"></select>
+      <span style="display:flex;gap:6px">
+        <button class="btn primary" onclick="showLogs()">Показать</button>
+        <button class="btn" onclick="toggleFollow()" id="followbtn">Автообновление: выкл</button>
+      </span>
+    </div>
+    <div class="card"><pre id="logbody" style="max-height:70vh">Выбери источник и нажми «Показать».</pre></div>
+  </section>
+
   <section id="tab-backups" style="display:none">
-    <div class="row" style="margin-bottom:12px">
-      <p class="hint" style="margin:0">Полный бэкап создаётся на малине и занимает 1–3 минуты.</p>
-      <button class="btn primary" id="mkbackup">Создать полный бэкап</button>
+    <div class="row" style="margin-bottom:12px;flex-wrap:wrap">
+      <p class="hint" style="margin:0">Полный бэкап создаётся на малине 1–3 минуты.</p>
+      <button class="btn primary" onclick="mkBackup()">Создать полный бэкап</button>
     </div>
     <div class="card"><table id="backups"><tbody></tbody></table></div>
   </section>
+
+  <section id="tab-system" style="display:none">
+    <div class="grid" id="system"></div>
+    <div class="card danger-zone" style="margin-top:12px">
+      <h3>Опасная зона</h3>
+      <div class="muted">Действия выполняются на хосте. Туннель <code>ha_link</code> при ребуте поднимется сам (boot: auto).</div>
+      <div class="actions">
+        <button class="btn warn" onclick="hostAct('reboot')">Перезагрузить хост</button>
+        <button class="btn danger" onclick="hostAct('shutdown')">Выключить хост</button>
+      </div>
+    </div>
+  </section>
 </main>
+
 <div class="modal" id="modal">
   <div class="box">
     <div class="head"><b id="modal-title">Логи</b>
@@ -244,154 +432,274 @@ PAGE = r"""<!DOCTYPE html>
 <div class="toast" id="toast"></div>
 <script>
 const BASE = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
-let STATE = null;
+let STATE = null, CURDIR = '/config', CURFILE = null, FOLLOW = null;
 
-function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function toast(msg, isErr){
   const t = document.getElementById('toast');
   t.textContent = msg; t.className = 'toast show' + (isErr ? ' err' : '');
-  clearTimeout(t._h); t._h = setTimeout(() => t.className = 'toast', 4000);
+  clearTimeout(t._h); t._h = setTimeout(() => t.className = 'toast', 4500);
 }
 function badge(state){
   const s = ['started','stopped','error'].includes(state) ? state : 'unknown';
   const label = {started:'работает', stopped:'остановлен', error:'ошибка', unknown:'неизвестно'}[s];
   return '<span class="badge ' + s + '">' + label + '</span>';
 }
-function bar(pct, cls){
+function bar(pct){
   const c = pct >= 90 ? 'crit' : (pct >= 75 ? 'warn' : '');
   return '<div class="bar ' + c + '"><i style="width:' + Math.min(100, pct) + '%"></i></div>';
 }
 function fmtDate(s){ try { return new Date(s).toLocaleString('ru-RU'); } catch(e){ return s; } }
+function fmtSize(b){ return b > 1048576 ? (b/1048576).toFixed(1)+' МБ' : Math.max(1, Math.round(b/1024))+' КБ'; }
+
+async function api(path, opts){
+  const r = await fetch(BASE + path, Object.assign({cache:'no-store'}, opts || {}));
+  const ct = r.headers.get('content-type') || '';
+  const body = ct.includes('json') ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((body && (body.message || body.error)) || ('HTTP ' + r.status));
+  return body;
+}
 
 function renderApps(){
   const box = document.getElementById('apps');
-  box.innerHTML = STATE.addons.map(a => {
+  box.innerHTML = (STATE.addons||[]).map(a => {
     const upd = a.update_available && a.version_latest
       ? '<div class="muted" style="color:#e0a13a;margin-top:6px">Доступно обновление: ' + esc(a.version_latest) + '</div>' : '';
+    const btns = [];
+    if (a.state === 'started') {
+      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'stop\')">Стоп</button>');
+      btns.push('<button class="btn" onclick="appAct(\'' + a.slug + '\',\'restart\')">Рестарт</button>');
+    } else {
+      btns.push('<button class="btn primary" onclick="appAct(\'' + a.slug + '\',\'start\')">Запустить</button>');
+    }
+    if (a.update_available) btns.push('<button class="btn warn" onclick="appAct(\'' + a.slug + '\',\'update\')">Обновить</button>');
+    btns.push('<button class="btn" onclick="openLogs(\'' + a.slug + '\')">Логи</button>');
+    btns.push('<button class="btn danger" onclick="appAct(\'' + a.slug + '\',\'uninstall\')">Удалить</button>');
     return '<div class="card">' +
       '<div class="row"><h3>' + esc(a.name) + '</h3>' + badge(a.state) + '</div>' +
-      '<div class="muted">' + esc(a.slug) + ' · v' + esc(a.version) + '</div>' +
+      '<div class="muted">' + esc(a.slug) + ' · v' + esc(a.version) + ' · boot: ' + esc(a.boot) + '</div>' +
       upd +
-      '<div class="actions">' +
-        (a.state === 'started'
-          ? '<button class="btn" onclick="act(\'' + a.slug + '\',\'stop\')">Стоп</button>' +
-            '<button class="btn" onclick="act(\'' + a.slug + '\',\'restart\')">Рестарт</button>'
-          : '<button class="btn primary" onclick="act(\'' + a.slug + '\',\'start\')">Запустить</button>') +
-        '<button class="btn" onclick="logs(\'' + a.slug + '\')">Логи</button>' +
-      '</div></div>';
+      '<div class="actions">' + btns.join('') + '</div></div>';
   }).join('') || '<div class="card muted">Нет установленных аддонов</div>';
 }
 
 function renderSystem(){
-  const h = STATE.host || {}, s = STATE.supervisor || {}, c = STATE.core || {}, m = STATE.mem || {};
-  const memPct = m.total_mb ? Math.round(100 * m.used_mb / m.total_mb) : 0;
-  const diskPct = h.disk_total ? Math.round(100 * h.disk_used / h.disk_total) : 0;
-  const swapPct = m.swap_total_mb ? Math.round(100 * m.swap_used_mb / m.swap_total_mb) : 0;
+  const h = STATE.host||{}, s = STATE.supervisor||{}, c = STATE.core||{}, m = STATE.mem||{};
+  const memPct = m.total_mb ? Math.round(100*m.used_mb/m.total_mb) : 0;
+  const diskPct = h.disk_total ? Math.round(100*h.disk_used/h.disk_total) : 0;
+  const swapPct = m.swap_total_mb ? Math.round(100*m.swap_used_mb/m.swap_total_mb) : 0;
+  const temp = STATE.temp_c != null ? STATE.temp_c + ' °C' : '—';
   document.getElementById('system').innerHTML =
-    '<div class="card"><h3>Хост</h3>' +
-      '<div class="muted">' + esc(h.operating_system || '—') + '</div>' +
-      '<div class="muted">' + esc(h.hostname || '') + ' · ' + esc(h.kernel || '') + '</div>' +
-      '<div class="muted">' + esc(h.timezone || '') + '</div>' +
-    '</div>' +
-    '<div class="card"><h3>Память</h3>' +
-      '<div class="muted">' + (m.used_mb||0) + ' / ' + (m.total_mb||0) + ' МБ (' + memPct + '%)</div>' +
-      bar(memPct) +
-      '<div class="muted" style="margin-top:8px">swap: ' + (m.swap_used_mb||0) + ' / ' + (m.swap_total_mb||0) + ' МБ (' + swapPct + '%)</div>' +
-      bar(swapPct) +
-    '</div>' +
-    '<div class="card"><h3>Диск</h3>' +
-      '<div class="muted">' + (h.disk_used||0) + ' / ' + (h.disk_total||0) + ' ГБ (' + diskPct + '%)</div>' +
-      bar(diskPct) +
-      '<div class="muted" style="margin-top:8px">свободно: ' + (h.disk_free||0) + ' ГБ</div>' +
-    '</div>' +
-    '<div class="card"><h3>Supervisor</h3>' +
-      '<div class="muted">v' + esc(s.version || '—') + ' · ' + esc(s.channel || '') + ' · ' + esc(s.arch || '') + '</div>' +
-      '<div class="muted">healthy: ' + (s.healthy ? 'да' : 'нет') + ' · supported: ' + (s.supported ? 'да' : 'нет') + '</div>' +
-    '</div>' +
-    '<div class="card"><h3>Home Assistant</h3>' +
-      '<div class="muted">v' + esc(c.version || '—') + ' · ' + esc(c.machine || '') + '</div>' +
-      (c.update_available ? '<div class="muted" style="color:#e0a13a">доступно обновление</div>' : '') +
-    '</div>' +
-    '<div class="card"><h3>Нагрузка</h3>' +
-      '<div class="muted">' + (STATE.loadavg && STATE.loadavg.length ? STATE.loadavg.join('  ') : '—') + '</div>' +
-    '</div>';
+    '<div class="card"><h3>Хост</h3><div class="muted">' + esc(h.operating_system||'—') + '</div>' +
+      '<div class="muted">' + esc(h.hostname||'') + ' · ' + esc(h.kernel||'') + '</div>' +
+      '<div class="muted">температура CPU: ' + temp + '</div>' +
+      '<div class="muted">' + esc(h.timezone||'') + ' · uptime: ' + (h.startup_time!=null?Math.round(h.startup_time)+' с':'—') + '</div></div>' +
+    '<div class="card"><h3>Память</h3><div class="muted">' + (m.used_mb||0) + ' / ' + (m.total_mb||0) + ' МБ (' + memPct + '%)</div>' + bar(memPct) +
+      '<div class="muted" style="margin-top:8px">swap: ' + (m.swap_used_mb||0) + ' / ' + (m.swap_total_mb||0) + ' МБ (' + swapPct + '%)</div>' + bar(swapPct) + '</div>' +
+    '<div class="card"><h3>Диск</h3><div class="muted">' + (h.disk_used||0) + ' / ' + (h.disk_total||0) + ' ГБ (' + diskPct + '%)</div>' + bar(diskPct) +
+      '<div class="muted" style="margin-top:8px">свободно: ' + (h.disk_free||0) + ' ГБ</div></div>' +
+    '<div class="card"><h3>Supervisor</h3><div class="muted">v' + esc(s.version||'—') + ' · ' + esc(s.channel||'') + ' · ' + esc(s.arch||'') + '</div>' +
+      '<div class="muted">healthy: ' + (s.healthy?'да':'нет') + ' · supported: ' + (s.supported?'да':'нет') + '</div></div>' +
+    '<div class="card"><h3>Home Assistant</h3><div class="muted">v' + esc(c.version||'—') + ' · ' + esc(c.machine||'') + '</div>' +
+      (c.update_available?'<div class="muted" style="color:#e0a13a">доступно обновление</div>':'') +
+      '<div class="actions"><button class="btn warn" onclick="coreAct(\'update\')">Обновить HA</button></div></div>' +
+    '<div class="card"><h3>Нагрузка</h3><div class="muted">' + ((STATE.loadavg||[]).join('  ') || '—') + '</div></div>';
 }
 
 function renderBackups(){
   const tb = document.querySelector('#backups tbody');
-  tb.innerHTML = '<tr><th>Имя</th><th>Дата</th><th>Тип</th><th>Размер</th></tr>' +
-    (STATE.backups.map(b =>
-      '<tr><td>' + esc(b.name) + '</td><td>' + esc(fmtDate(b.date)) + '</td>' +
-      '<td>' + esc(b.type) + '</td><td>' + esc(b.size_mb) + ' МБ</td></tr>').join('') ||
-      '<tr><td colspan="4" class="muted">Бэкапов нет</td></tr>');
+  tb.innerHTML = '<tr><th>Имя</th><th>Дата</th><th>Тип</th><th>Размер</th><th></th></tr>' +
+    ((STATE.backups||[]).map(b =>
+      '<tr><td>' + esc(b.name) + '</td><td>' + esc(fmtDate(b.date)) + '</td><td>' + esc(b.type) + '</td><td>' + esc(b.size_mb) + ' МБ</td>' +
+      '<td style="white-space:nowrap"><a class="btn" style="text-decoration:none" href="' + BASE + 'api/backups/' + encodeURIComponent(b.slug) + '/download">Скачать</a> ' +
+      '<button class="btn danger bdel" data-slug="' + esc(b.slug) + '" data-name="' + esc(b.name) + '">Удалить</button></td></tr>'
+    ).join('') || '<tr><td colspan="5" class="muted">Бэкапов нет</td></tr>');
+  tb.querySelectorAll('.bdel').forEach(el => {
+    el.onclick = () => delBackup(el.dataset.slug, el.dataset.name);
+  });
+}
+
+function renderRepos(){
+  document.getElementById('repos').innerHTML = (STATE.repositories||[]).map(r =>
+    '<div class="row" style="padding:6px 0;border-bottom:1px solid #232838">' +
+    '<div><b>' + esc(r.name||r.slug) + '</b><div class="muted">' + esc(r.url||r.slug) + '</div></div>' +
+    '<button class="btn danger" onclick="repoDel(\'' + esc(r.slug) + '\')">Удалить</button></div>'
+  ).join('') || '<div class="muted">Нет репозиториев</div>';
+
+  const sel = document.getElementById('logsrc');
+  const opts = ['<option value="core">HA Core</option>', '<option value="supervisor">Supervisor</option>']
+    .concat((STATE.addons||[]).map(a => '<option value="' + a.slug + '">' + esc(a.name) + '</option>'));
+  const prev = sel.value;
+  sel.innerHTML = opts.join('');
+  if (prev) sel.value = prev;
 }
 
 function render(){
+  const s = STATE.supervisor||{}, c = STATE.core||{}, h = STATE.host||{};
   document.getElementById('sub').textContent =
-    'Supervisor ' + ((STATE.supervisor||{}).version || '?') +
-    ' · HA ' + ((STATE.core||{}).version || '?') +
-    ' · ' + ((STATE.host||{}).operating_system || '') +
-    (STATE.errors && STATE.errors.length ? ' · ошибки: ' + STATE.errors.join(', ') : '');
-  renderApps(); renderSystem(); renderBackups();
+    'HA ' + (c.version||'?') + ' · Supervisor ' + (s.version||'?') + ' · ' + (h.operating_system||'') +
+    ' · панель v' + (STATE.version||'?') +
+    ((STATE.errors&&STATE.errors.length) ? ' · ошибки: ' + STATE.errors.join(', ') : '');
+  renderApps(); renderSystem(); renderBackups(); renderRepos();
 }
 
 async function load(){
-  try {
-    const r = await fetch(BASE + 'api/state', {cache:'no-store'});
-    STATE = await r.json();
-    render();
-  } catch(e) { toast('Не удалось получить состояние: ' + e, true); }
+  try { STATE = await api('api/state'); render(); }
+  catch(e){ toast('Не удалось получить состояние: ' + e.message, true); }
 }
 
-async function act(slug, action){
-  if (action !== 'start' && !confirm('Выполнить «' + action + '» для ' + slug + '?')) return;
-  toast('Выполняю ' + action + '…');
-  try {
-    const r = await fetch(BASE + 'api/apps/' + encodeURIComponent(slug) + '/' + action, {method:'POST'});
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.message || j.error || r.status);
-    toast('Готово: ' + action);
-  } catch(e) { toast('Ошибка: ' + e.message, true); }
-  setTimeout(load, 1200);
+async function appAct(slug, action){
+  const names = {stop:'остановить', restart:'перезапустить', start:'запустить', update:'обновить', uninstall:'УДАЛИТЬ'};
+  if (action !== 'start' && !confirm('Точно ' + names[action] + ' ' + slug + '?')) return;
+  if (action === 'uninstall' && !confirm('Удаление необратимо. Продолжить?')) return;
+  toast('Выполняю: ' + names[action] + '…');
+  try { await api('api/apps/' + encodeURIComponent(slug) + '/' + action, {method:'POST'}); toast('Готово: ' + names[action]); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  setTimeout(load, 1500);
 }
 
-async function logs(slug, name){
-  document.getElementById('modal-title').textContent = 'Логи: ' + name;
-  document.getElementById('modal-body').textContent = 'загрузка…';
-  document.getElementById('modal').classList.add('open');
-  try {
-    const r = await fetch(BASE + 'api/apps/' + encodeURIComponent(slug) + '/logs');
-    const t = await r.text();
-    document.getElementById('modal-body').textContent = t || '(пусто)';
-  } catch(e) {
-    document.getElementById('modal-body').textContent = 'Ошибка: ' + e;
-  }
+async function coreAct(action){
+  const label = {restart:'перезапустить Home Assistant', start:'запустить', stop:'ОСТАНОВИТЬ', update:'обновить Home Assistant'}[action];
+  if (!confirm('Точно ' + label + '?')) return;
+  toast('Выполняю…');
+  try { await api('api/system/core/' + action, {method:'POST'}); toast('Команда принята'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  setTimeout(load, 3000);
 }
-function closeModal(){ document.getElementById('modal').classList.remove('open'); }
 
-document.getElementById('mkbackup').onclick = async () => {
-  if (!confirm('Создать полный бэкап? Это займёт 1–3 минуты.')) return;
-  toast('Создаю бэкап…');
-  try {
-    const r = await fetch(BASE + 'api/backups', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({name: 'manual_' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')})});
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.message || j.error || r.status);
-    toast('Бэкап создан');
-  } catch(e) { toast('Ошибка: ' + e.message, true); }
+async function hostAct(action){
+  const label = action === 'reboot' ? 'ПЕРЕЗАГРУЗИТЬ' : 'ВЫКЛЮЧИТЬ';
+  if (!confirm('Реально ' + label + ' хост?')) return;
+  if (!confirm('Последнее подтверждение: ' + label + '?')) return;
+  toast('Отправляю команду…');
+  try { await api('api/system/host/' + action, {method:'POST'}); toast('Команда отправлена, связь прервётся'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+
+async function storeReload(){
+  toast('Перезагружаю магазин (до минуты)…');
+  try { await api('api/store/reload', {method:'POST', setTimeout:0}); toast('Магазин обновлён'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
   load();
-};
+}
+async function repoAdd(){
+  const url = document.getElementById('repo-url').value.trim();
+  if (!url) return;
+  try { await api('api/store/repos', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})}); toast('Репозиторий добавлен'); document.getElementById('repo-url').value=''; }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  load();
+}
+async function repoDel(slug){
+  if (!confirm('Удалить репозиторий ' + slug + '? Аддоны из него останутся установленными.')) return;
+  try { await api('api/store/repos/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Удалён'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  load();
+}
 
+async function mkBackup(){
+  if (!confirm('Создать полный бэкап? 1–3 минуты.')) return;
+  toast('Создаю бэкап…');
+  try { await api('api/backups', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name:'manual_' + new Date().toISOString().slice(0,16).replace(/[:T]/g,'-')})}); toast('Бэкап создан'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  load();
+}
+async function delBackup(slug, name){
+  if (!confirm('Удалить бэкап «' + name + '»?')) return;
+  try { await api('api/backups/' + encodeURIComponent(slug), {method:'DELETE'}); toast('Удалён'); }
+  catch(e){ toast('Ошибка: ' + e.message, true); }
+  load();
+}
+
+/* --- логи --- */
+async function openLogs(slug){
+  document.getElementById('logsrc').value = slug;
+  document.querySelector('nav button[data-tab=logs]').click();
+  showLogs();
+}
+async function showLogs(){
+  const src = document.getElementById('logsrc').value;
+  const body = document.getElementById('logbody');
+  try {
+    const t = await api('api/logs?source=' + encodeURIComponent(src) + '&lines=300');
+    body.textContent = t || '(пусто)';
+    body.scrollTop = body.scrollHeight;
+  } catch(e){ body.textContent = 'Ошибка: ' + e.message; }
+}
+function toggleFollow(){
+  const b = document.getElementById('followbtn');
+  if (FOLLOW) { clearInterval(FOLLOW); FOLLOW = null; b.textContent = 'Автообновление: выкл'; }
+  else { FOLLOW = setInterval(showLogs, 5000); b.textContent = 'Автообновление: вкл'; }
+}
+
+/* --- файлы --- */
+async function fload(path){
+  try {
+    const d = await api('api/files?path=' + encodeURIComponent(path));
+    CURDIR = d.path;
+    document.getElementById('fpath').textContent = d.path;
+    document.getElementById('flist').innerHTML = d.items.map(it =>
+      '<div class="fitem" data-path="' + esc(d.path + '/' + it.name) + '" data-dir="' + (it.dir ? '1' : '0') + '">' +
+      '<span>' + (it.dir ? '📁 ' : '📄 ') + esc(it.name) + '</span>' +
+      '<span class="muted">' + (it.dir ? '' : fmtSize(it.size)) + '</span></div>'
+    ).join('') || '<div class="muted">пусто</div>';
+    document.querySelectorAll('#flist .fitem').forEach(el => {
+      el.onclick = () => el.dataset.dir === '1' ? fload(el.dataset.path) : fopen(el.dataset.path);
+    });
+    window._fparent = d.parent;
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+function fup(){ if (window._fparent) fload(window._fparent); }
+async function fopen(path){
+  try {
+    const d = await api('api/files/read?path=' + encodeURIComponent(path));
+    CURFILE = d.path;
+    document.getElementById('fname').textContent = d.path;
+    document.getElementById('fcontent').value = d.content;
+    document.getElementById('fmeta').textContent = fmtSize(d.size) + (d.size > 512*1024 ? ' (показаны первые 512 КБ)' : '');
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+async function fsave(){
+  if (!CURFILE) return toast('Файл не выбран', true);
+  try {
+    await api('api/files/write', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path: CURFILE, content: document.getElementById('fcontent').value})});
+    toast('Сохранено (старая версия — .bak)');
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+async function fnewFile(){
+  const name = document.getElementById('fnew').value.trim();
+  if (!name) return;
+  const p = CURDIR.replace(/\/$/,'') + '/' + name;
+  try {
+    await api('api/files/write', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path: p, content: ''})});
+    document.getElementById('fnew').value = '';
+    fload(CURDIR); fopen(p);
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+async function fdel(){
+  if (!CURFILE) return;
+  if (!confirm('Удалить ' + CURFILE + '?')) return;
+  try {
+    await api('api/files?path=' + encodeURIComponent(CURFILE), {method:'DELETE'});
+    toast('Удалён'); CURFILE = null;
+    document.getElementById('fname').textContent = 'файл не выбран';
+    document.getElementById('fcontent').value = '';
+    fload(CURDIR);
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+
+function closeModal(){ document.getElementById('modal').classList.remove('open'); }
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  ['apps','system','backups'].forEach(t => {
-    document.getElementById('tab-' + t).style.display = (t === b.dataset.tab) ? '' : 'none';
-  });
+  ['apps','store','files','logs','backups','system'].forEach(t =>
+    document.getElementById('tab-' + t).style.display = (t === b.dataset.tab) ? '' : 'none');
+  if (b.dataset.tab === 'files') fload(CURDIR);
+  if (b.dataset.tab === 'logs') showLogs();
 });
 document.getElementById('modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
-
 load();
 setInterval(load, 15000);
 </script>
@@ -400,11 +708,20 @@ setInterval(load, 15000);
 """
 
 
+# --- HTTP handler ----------------------------------------------------------
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HAControl/" + VERSION
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+
+    def _path(self):
+        path = urlparse(self.path).path or "/"
+        m = re.match(r"^/api/hassio_ingress/[^/]+(/.*)?$", path)
+        if m:
+            path = m.group(1) or "/"
+        return path
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         raw = body.encode("utf-8") if isinstance(body, str) else body
@@ -421,14 +738,27 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False))
 
-    def _path(self):
-        """Путь запроса без префикса ingress (/api/hassio_ingress/<token>)."""
-        path = urlparse(self.path).path or "/"
-        m = re.match(r"^/api/hassio_ingress/[^/]+(/.*)?$", path)
-        if m:
-            path = m.group(1) or "/"
-        return path
+    def _body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        if length > MAX_WRITE:
+            raise ValueError("too large")
+        raw = self.rfile.read(length)
+        if not raw:
+            return {}
+        return json.loads(raw)
 
+    def _supervisor_action(self, path, action, ok_obj, timeout=300):
+        status, data = supervisor(path, method="POST", timeout=timeout)
+        if status != 200:
+            return self._json(status or 502, {"error": action + " failed",
+                                              "message": _msg(data), "detail": data})
+        obj = {"ok": True}
+        obj.update(ok_obj or {})
+        return self._json(200, obj)
+
+    # --- GET ---
     def do_GET(self):
         path = self._path()
         if not path.startswith("/api/"):
@@ -442,69 +772,181 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             return self._json(200, collect_state())
 
-        m = re.match(r"^/api/apps/([a-z0-9_]+)/logs$", path)
-        if m:
-            slug = m.group(1)
+        if path == "/api/logs":
             qs = parse_qs(urlparse(self.path).query)
-            lines = qs.get("lines", ["200"])[0]
-            status, data = supervisor("/addons/%s/logs" % slug, timeout=30)
+            source = qs.get("source", ["core"])[0]
+            try:
+                lines = max(10, min(3000, int(qs.get("lines", ["200"])[0])))
+            except ValueError:
+                lines = 200
+            if source == "core":
+                sp = "/core/logs"
+            elif source == "supervisor":
+                sp = "/supervisor/logs"
+            elif SLUG_RE.match(source):
+                sp = "/addons/%s/logs" % source
+            else:
+                return self._json(400, {"error": "bad source"})
+            status, data = supervisor(sp, timeout=30)
             if status != 200:
-                return self._json(status or 502, {"error": "logs: %s" % status, "detail": data})
+                return self._json(status or 502, {"error": "logs failed", "message": _msg(data)})
             text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
             if isinstance(data, dict) and isinstance(data.get("data"), str):
                 text = data["data"]
-            try:
-                n = max(10, min(2000, int(lines)))
-            except ValueError:
-                n = 200
-            return self._send(200, "\n".join(text.splitlines()[-n:]),
+            return self._send(200, "\n".join(text.splitlines()[-lines:]),
                               "text/plain; charset=utf-8")
 
+        m = re.match(r"^/api/backups/([A-Za-z0-9_.-]+)/download$", path)
+        if m:
+            slug = m.group(1)
+            status, blob = supervisor("/backups/%s/download" % slug, timeout=600, raw=True)
+            if status != 200:
+                return self._json(status or 502, {"error": "download failed", "message": _msg(blob)})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-tar")
+            self.send_header("Content-Disposition", 'attachment; filename="%s.tar"' % slug)
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            try:
+                self.wfile.write(blob)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        if path == "/api/files":
+            qs = parse_qs(urlparse(self.path).query)
+            res, err = file_listing(qs.get("path", ["/config"])[0])
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, res)
+
+        if path == "/api/files/read":
+            qs = parse_qs(urlparse(self.path).query)
+            res, err = file_read(qs.get("path", [""])[0])
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, res)
+
         return self._json(404, {"error": "not found", "path": path})
 
+    # --- POST ---
     def do_POST(self):
         path = self._path()
-        length = int(self.headers.get("Content-Length") or 0)
-        body = {}
-        if length:
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except ValueError:
-                return self._json(400, {"error": "invalid json"})
+        try:
+            body = self._body()
+        except ValueError:
+            return self._json(400, {"error": "invalid json"})
 
-        m = re.match(r"^/api/apps/([a-z0-9_]+)/(start|stop|restart)$", path)
+        m = re.match(r"^/api/apps/([A-Za-z0-9_.-]+)/([a-z]+)$", path)
         if m:
             slug, action = m.group(1), m.group(2)
-            if not SLUG_RE.match(slug) or action not in ACTIONS:
-                return self._json(400, {"error": "bad request"})
-            status, data = supervisor("/addons/%s/%s" % (slug, action), method="POST", timeout=180)
-            if status != 200:
-                return self._json(status or 502, {"error": "action failed",
-                                                  "message": _msg(data), "detail": data})
-            return self._json(200, {"ok": True, "slug": slug, "action": action})
+            if action not in APP_ACTIONS:
+                return self._json(400, {"error": "bad action"})
+            return self._supervisor_action("/addons/%s/%s" % (slug, action), action,
+                                           {"slug": slug, "action": action}, timeout=900)
 
+        m = re.match(r"^/api/system/core/([a-z]+)$", path)
+        if m and m.group(1) in CORE_ACTIONS:
+            return self._supervisor_action("/core/%s" % m.group(1), m.group(1), {}, timeout=300)
+
+        m = re.match(r"^/api/system/host/([a-z]+)$", path)
+        if m and m.group(1) in HOST_ACTIONS:
+            return self._supervisor_action("/host/%s" % m.group(1), m.group(1), {},
+                                           timeout=120)
+
+        if path == "/api/store/reload":
+            return self._supervisor_action("/store/reload", "reload", {}, timeout=600)
+
+        if path == "/api/store/repos":
+            url = str(body.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                return self._json(400, {"error": "нужен http(s)-URL"})
+            status, data = supervisor("/store/repositories", method="POST",
+                                      payload={"repository": url}, timeout=600)
+            if status != 200:
+                return self._json(status or 502, {"error": "add_repo failed",
+                                                  "message": _msg(data)})
+            return self._json(200, {"ok": True, "url": url})
         if path == "/api/backups":
             name = str(body.get("name") or "").strip()[:64] or "manual"
-            status, data = supervisor("/backups", method="POST",
-                                      payload={"name": name}, timeout=1800)
+            status, data = supervisor("/backups", method="POST", payload={"name": name}, timeout=3000)
             if status != 200:
-                return self._json(status or 502, {"error": "backup failed",
-                                                  "message": _msg(data), "detail": data})
+                return self._json(status or 502, {"error": "backup failed", "message": _msg(data)})
             return self._json(200, {"ok": True, "name": name})
+
+        if path == "/api/files/write":
+            err = file_write(str(body.get("path") or ""), str(body.get("content") or ""))
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, {"ok": True})
+
+        if path == "/api/files/mkdir":
+            err = file_mkdir(str(body.get("path") or ""))
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, {"ok": True})
+
+        return self._json(404, {"error": "not found", "path": path})
+
+    # --- DELETE ---
+    def do_DELETE(self):
+        path = self._path()
+
+        m = re.match(r"^/api/backups/([A-Za-z0-9_.-]+)$", path)
+        if m:
+            slug = m.group(1)
+            status, data = supervisor("/backups/%s" % slug, method="DELETE", timeout=120)
+            if status != 200:
+                return self._json(status or 502, {"error": "delete failed", "message": _msg(data)})
+            return self._json(200, {"ok": True, "slug": slug})
+
+        m = re.match(r"^/api/store/repos/([A-Za-z0-9_.-]+)$", path)
+        if m:
+            slug = m.group(1)
+            status, data = supervisor("/store/repositories/%s" % slug, method="DELETE", timeout=120)
+            if status != 200:
+                return self._json(status or 502, {"error": "delete failed", "message": _msg(data)})
+            return self._json(200, {"ok": True, "slug": slug})
+
+        if path == "/api/files":
+            qs = parse_qs(urlparse(self.path).query)
+            err = file_delete(qs.get("path", [""])[0])
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, {"ok": True})
 
         return self._json(404, {"error": "not found", "path": path})
 
 
-def _msg(data):
-    if isinstance(data, dict):
-        return str(data.get("message") or data.get("error") or "")[:300]
-    return str(data)[:300]
+# --- startup ---------------------------------------------------------------
+
+def ensure_panel():
+    """Включает панель в сайдбаре, если её выключили (флаг живёт в apps.json)."""
+    status, data = supervisor("/addons/self/info", timeout=20)
+    if status != 200 or not isinstance(data, dict):
+        return
+    info = data.get("data", {})
+    if not info.get("ingress"):
+        return
+    if info.get("ingress_panel"):
+        return
+    supervisor("/addons/self/options", method="POST", payload={"ingress_panel": True}, timeout=60)
+    print("ingress_panel включён (панель появится в меню)", flush=True)
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     if not TOKEN:
-        print("FATAL: SUPERVISOR_TOKEN is not set (add-on must have hassio_api: true)", flush=True)
+        print("FATAL: SUPERVISOR_TOKEN не задан (нужен hassio_api: true)", flush=True)
         sys.exit(1)
+    try:
+        ensure_panel()
+    except Exception as exc:
+        print("ensure_panel: %s" % exc, flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     print("HA Control %s listening on 0.0.0.0:%d" % (VERSION, PORT), flush=True)
