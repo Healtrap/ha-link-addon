@@ -20,7 +20,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -361,6 +361,90 @@ def docker_exec(container, cmd, timeout=120, limit=200 * 1024):
             break
         time.sleep(0.2)
     return text, exit_code, None
+
+
+def _retag(image, tag):
+    """ghcr.io/x/y:1.0 -> ghcr.io/x/y:<tag> (учитывая порт в registry)."""
+    if "@" in image:
+        image = image.split("@", 1)[0]
+    slash = image.rfind("/")
+    colon = image.rfind(":")
+    if colon > slash:
+        return image[:colon] + ":" + tag
+    return image + ":" + tag
+
+
+def _split_image(image):
+    """Возвращает (repo, tag)."""
+    if "@" in image:
+        return image.split("@", 1)[0], None
+    slash = image.rfind("/")
+    colon = image.rfind(":")
+    if colon > slash:
+        return image[:colon], image[colon + 1:]
+    return image, None
+
+
+def app_prepull(slug):
+    """Скачивает образ новой версии заранее и проверяет, что он запускаемый."""
+    status, info = supervisor("/addons/%s/info" % slug, timeout=30)
+    if status != 200 or not isinstance(info, dict):
+        return None, "не удалось получить данные аддона (%s)" % status
+    data = info.get("data", {}) or {}
+    version = data.get("version_latest")
+    if not version:
+        return None, "нет версии для обновления"
+
+    status, items = docker_call("GET", "/containers/json?all=1", timeout=30)
+    if status != 200 or not isinstance(items, list):
+        return None, "docker недоступен (%s)" % status
+    target = "app_%s" % slug
+    image = None
+    for item in items:
+        names = [n.lstrip("/") for n in (item.get("Names") or [])]
+        if target in names:
+            image = item.get("Image")
+            break
+    if not image:
+        return None, "контейнер %s не найден" % target
+
+    repo, cur_tag = _split_image(image)
+    if cur_tag == version:
+        return {"image": image, "pulled": False, "reason": "версия уже локально"}, None
+    new_image = _retag(image, version)
+
+    status, resp = docker_call(
+        "POST", "/images/create?fromImage=%s&tag=%s" % (quote(repo, safe=""), quote(version)),
+        timeout=1200)
+    if status != 200:
+        return None, "не удалось скачать %s: %s %s" % (new_image, status, _msg(resp))
+
+    # проверка: у образа должна быть команда запуска
+    status, insp = docker_call("GET", "/images/%s/json" % quote(new_image, safe=""), timeout=60)
+    if status != 200 or not isinstance(insp, dict):
+        return None, "образ скачан, но не читается (%s)" % status
+    cfg = insp.get("Config") or {}
+    if not (cfg.get("Cmd") or cfg.get("Entrypoint")):
+        return None, "образ без Cmd/Entrypoint — обновление отменено"
+    return {"image": new_image, "pulled": True, "version": version,
+            "size_mb": round((insp.get("Size") or 0) / 1048576, 1)}, None
+
+
+def check_tunnel(url, timeout=12):
+    import ssl
+    ctx = ssl._create_unverified_context()
+    t0 = time.time()
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return {"url": url, "code": resp.status, "ok": 200 <= resp.status < 400,
+                    "seconds": round(time.time() - t0, 2)}
+    except urllib.error.HTTPError as exc:
+        return {"url": url, "code": exc.code, "ok": 200 <= exc.code < 400,
+                "seconds": round(time.time() - t0, 2)}
+    except Exception as exc:
+        return {"url": url, "code": 0, "ok": False, "error": "%s: %s" % (type(exc).__name__, exc),
+                "seconds": round(time.time() - t0, 2)}
 
 
 # --- files -----------------------------------------------------------------
@@ -706,6 +790,12 @@ PAGE = r"""<!DOCTYPE html>
 
   <section id="tab-system" style="display:none">
     <div class="grid" id="system"></div>
+    <div class="card" style="margin-top:12px">
+      <h3>Связь</h3>
+      <div class="muted">Проверка публичного туннеля <code>ha_link</code> изнутри панели.</div>
+      <div class="actions"><button class="btn" onclick="checkTunnel()">Проверить туннель</button></div>
+      <pre id="tunnelout" style="margin-top:8px">—</pre>
+    </div>
     <div class="card danger-zone" style="margin-top:12px">
       <h3>Опасная зона</h3>
       <div class="muted">Действия выполняются на хосте. Туннель <code>ha_link</code> при ребуте поднимется сам (boot: auto).</div>
@@ -847,6 +937,16 @@ async function appAct(slug, action){
   const names = {stop:'остановить', restart:'перезапустить', start:'запустить', update:'обновить', uninstall:'УДАЛИТЬ'};
   if (action !== 'start' && !confirm('Точно ' + names[action] + ' ' + slug + '?')) return;
   if (action === 'uninstall' && !confirm('Удаление необратимо. Продолжить?')) return;
+  if (action === 'update') {
+    toast('Скачиваю образ заранее (простой будет короче)…');
+    try {
+      const p = await api('api/apps/' + encodeURIComponent(slug) + '/prepull', {method:'POST'});
+      if (p.pulled) toast('Образ ' + p.version + ' скачан (' + p.size_mb + ' МБ), обновляю…');
+      else toast('Образ уже локально, обновляю…');
+    } catch(e) {
+      toast('Предзагрузка не удалась: ' + e.message + ' — обновляю обычным путём', true);
+    }
+  }
   toast('Выполняю: ' + names[action] + '…');
   try { await api('api/apps/' + encodeURIComponent(slug) + '/' + action, {method:'POST'}); toast('Готово: ' + names[action]); }
   catch(e){ toast('Ошибка: ' + e.message, true); }
@@ -862,8 +962,18 @@ async function coreAct(action){
   setTimeout(load, 3000);
 }
 
-async function hostAct(action){
-  const label = action === 'reboot' ? 'ПЕРЕЗАГРУЗИТЬ' : 'ВЫКЛЮЧИТЬ';
+async function checkTunnel(){
+  const el = document.getElementById('tunnelout');
+  el.textContent = 'проверяю…';
+  try {
+    const d = await api('api/check/tunnel');
+    el.textContent = d.checks.map(c =>
+      c.url + ' -> ' + (c.code || 'ERR') + ' (' + c.seconds + 's)' + (c.error ? '  ' + c.error : '')
+    ).join('\n') + '\n\n' + (d.ok ? 'связь в порядке' : 'ЕСТЬ ПРОБЛЕМА');
+  } catch(e){ el.textContent = 'Ошибка: ' + e.message; }
+}
+
+async function hostAct(action){  const label = action === 'reboot' ? 'ПЕРЕЗАГРУЗИТЬ' : 'ВЫКЛЮЧИТЬ';
   if (!confirm('Реально ' + label + ' хост?')) return;
   if (!confirm('Последнее подтверждение: ' + label + '?')) return;
   toast('Отправляю команду…');
@@ -1205,6 +1315,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
 
+        if path == "/api/check/tunnel":
+            res = [
+                check_tunnel("https://ha.virvinsky.ru:8443/"),
+                check_tunnel("https://files.virvinsky.ru:8443/login"),
+            ]
+            return self._json(200, {"checks": res, "ok": all(r["ok"] for r in res)})
+
         if path == "/api/console/containers":
             if not docker_available():
                 return self._json(503, {"error": "docker socket недоступен (docker_api/protection)"})
@@ -1278,6 +1395,13 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
         except ValueError:
             return self._json(400, {"error": "invalid json"})
+
+        m = re.match(r"^/api/apps/([A-Za-z0-9_.-]+)/prepull$", path)
+        if m:
+            res, err = app_prepull(m.group(1))
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, dict(res, ok=True))
 
         m = re.match(r"^/api/apps/([A-Za-z0-9_.-]+)/([a-z]+)$", path)
         if m:
