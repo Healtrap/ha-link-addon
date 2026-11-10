@@ -36,8 +36,8 @@ esac
 
 download_frpc() {
   attempt=1
-  while [ "$attempt" -le 10 ]; do
-    if curl -4 -fsSL --max-time 300 "$FRPC_URL" -o /usr/local/bin/frpc.part; then
+  while [ "$attempt" -le 5 ]; do
+    if curl -4 -fsSL --connect-timeout 10 --max-time 60 "$FRPC_URL" -o /usr/local/bin/frpc.part; then
       chmod +x /usr/local/bin/frpc.part
       mv /usr/local/bin/frpc.part /usr/local/bin/frpc
       return 0
@@ -51,7 +51,7 @@ download_frpc() {
 }
 
 if [ ! -x /usr/local/bin/frpc ]; then
-  echo "Downloading frpc for $ARCH..."
+  echo "frpc is not bundled in the image, downloading for $ARCH..."
   if ! download_frpc; then
     echo "ERROR: cannot download frpc, giving up"
     sleep 60
@@ -78,16 +78,29 @@ fi
 HOST=""
 PORT=""
 
+AGENT_CACHE=/data/agent.json
+
 fetch_endpoint() {
-  if ! curl -4 -fsSL --max-time 20 "$CONFIG_URL" -o /tmp/agent.json.tmp; then
-    return 1
+  if curl -4 -fsSL --connect-timeout 10 --max-time 20 "$CONFIG_URL" -o /tmp/agent.json.tmp; then
+    HOST=$(jq -r '.relay.host // empty' /tmp/agent.json.tmp)
+    PORT=$(jq -r '.relay.port // 7000' /tmp/agent.json.tmp)
+    if [ -n "$HOST" ]; then
+      mv /tmp/agent.json.tmp /tmp/agent.json
+      cp /tmp/agent.json "$AGENT_CACHE" 2>/dev/null || true
+      return 0
+    fi
   fi
-  HOST=$(jq -r '.relay.host // empty' /tmp/agent.json.tmp)
-  PORT=$(jq -r '.relay.port // 7000' /tmp/agent.json.tmp)
-  if [ -z "$HOST" ]; then
-    return 1
+  # Сеть/домен недоступны: на старте берём последний удачный ответ,
+  # чтобы обновление аддона не превращалось в простой туннеля.
+  if [ -z "$HOST" ] && [ -s "$AGENT_CACHE" ]; then
+    HOST=$(jq -r '.relay.host // empty' "$AGENT_CACHE" 2>/dev/null) || HOST=""
+    PORT=$(jq -r '.relay.port // 7000' "$AGENT_CACHE" 2>/dev/null) || PORT=7000
+    if [ -n "$HOST" ]; then
+      echo "Cannot fetch $CONFIG_URL, using cached endpoint ($HOST:$PORT)"
+      return 0
+    fi
   fi
-  mv /tmp/agent.json.tmp /tmp/agent.json
+  return 1
 }
 
 write_config() {

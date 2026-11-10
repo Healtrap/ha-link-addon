@@ -1,5 +1,5 @@
 name: HA Link
-version: "0.2.3"
+version: "0.2.4"
 slug: ha_link
 description: Dynamic FRP client with endpoint discovery + remote file access
 url: https://virvinsky.ru/ha/
@@ -9,6 +9,9 @@ arch:
 startup: application
 boot: auto
 host_network: true
+dns:
+  - 1.1.1.1
+  - 8.8.8.8
 image: ghcr.io/healtrap/ha-link-addon/ha_link-{arch}
 map:
   - config:rw
