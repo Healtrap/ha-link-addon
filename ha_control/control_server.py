@@ -15,9 +15,9 @@ import sys
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -27,8 +27,11 @@ CORE_ACTIONS = {"start", "stop", "restart", "update"}
 HOST_ACTIONS = {"reboot", "shutdown"}
 SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 FILE_ROOTS = tuple(x for x in os.environ.get(
-    "CONTROL_FILE_ROOTS", "/config|/share|/ssl").split("|") if x)
+    "CONTROL_FILE_ROOTS",
+    "/config|/share|/media|/ssl|/backup|/addon_configs|/local_apps").split("|") if x)
 MAX_WRITE = 4 * 1024 * 1024
+MAX_UPLOAD = 2 * 1024 * 1024 * 1024
+CHUNK = 64 * 1024
 
 
 # --- Supervisor API --------------------------------------------------------
@@ -192,6 +195,7 @@ def collect_state():
         state["loadavg"] = [round(x, 2) for x in os.getloadavg()]
     except Exception:
         state["loadavg"] = []
+    state["file_roots"] = list(FILE_ROOTS)
     return state
 
 
@@ -281,6 +285,63 @@ def file_mkdir(path):
     return None
 
 
+def file_rename(path, name):
+    real, err = safe_path(path)
+    if err:
+        return err
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return "некорректное имя"
+    dest = os.path.join(os.path.dirname(real), name)
+    dest_real, err = safe_path(dest)
+    if err:
+        return err
+    if os.path.exists(dest_real):
+        return "такое имя уже существует"
+    os.rename(real, dest_real)
+    return None
+
+
+def file_upload(dir_path, name, length, stream):
+    """Пишет поток в файл потоково, без загрузки в память."""
+    real, err = safe_path(dir_path)
+    if err:
+        return None, err
+    if not os.path.isdir(real):
+        return None, "не каталог"
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None, "некорректное имя файла"
+    dest, err = safe_path(os.path.join(real, name))
+    if err:
+        return None, err
+    if os.path.isdir(dest):
+        return None, "это каталог"
+    if os.path.exists(dest):
+        shutil.copy2(dest, dest + ".bak")
+    remaining = length
+    tmp = dest + ".part"
+    try:
+        with open(tmp, "wb") as fh:
+            while remaining > 0:
+                chunk = stream.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                fh.write(chunk)
+                remaining -= len(chunk)
+        if remaining:
+            os.remove(tmp)
+            return None, "оборванная загрузка (не хватило %d байт)" % remaining
+        os.replace(tmp, dest)
+    except Exception as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return None, "%s: %s" % (type(exc).__name__, exc)
+    return dest, None
+
+
 # --- UI --------------------------------------------------------------------
 
 PAGE = r"""<!DOCTYPE html>
@@ -351,6 +412,10 @@ PAGE = r"""<!DOCTYPE html>
   .flist { max-height:60vh; overflow:auto; }
   .flist div { padding:6px 8px; border-radius:8px; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
   .flist div:hover { background:#1d2230; }
+  .roots { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  .chip { background:#1b2130; color:#9fb0cc; border:1px solid #2a3142; border-radius:999px;
+          padding:4px 10px; font-size:11px; cursor:pointer; }
+  .chip:hover { background:#243049; color:#e6e8ee; }
   .danger-zone { border-color:#5c252a; }
 </style>
 </head>
@@ -390,28 +455,39 @@ PAGE = r"""<!DOCTYPE html>
   </section>
 
   <section id="tab-files" style="display:none">
-    <p class="hint">Доступны <b>/config</b>, <b>/share</b>, <b>/ssl</b>. Перед сохранением создаётся копия <code>.bak</code>.</p>
+    <p class="hint">Все каталоги HA: <b>/config</b>, <b>/share</b>, <b>/media</b>, <b>/ssl</b>,
+      <b>/backup</b>, <b>/addon_configs</b>, <b>/local_apps</b>. При перезаписи создаётся копия <code>.bak</code>.</p>
     <div class="files">
       <div class="card">
-        <div class="row" style="margin-bottom:8px">
-          <b id="fpath" style="font-size:12px">/config</b>
-          <span><button class="btn" onclick="fup()">Вверх</button></span>
+        <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
+          <b id="fpath" style="font-size:12px;word-break:break-all">/config</b>
+          <span style="display:flex;gap:6px">
+            <button class="btn" onclick="fup()">Вверх</button>
+            <button class="btn primary" onclick="document.getElementById('fupload').click()">Загрузить</button>
+            <input type="file" id="fupload" multiple style="display:none">
+          </span>
         </div>
+        <div class="roots" id="froots"></div>
         <div class="flist" id="flist"></div>
-        <div class="row" style="margin-top:10px">
-          <input type="text" id="fnew" placeholder="новый_файл.yaml">
-          <button class="btn" onclick="fnewFile()">Создать</button>
+        <div class="row" style="margin-top:10px;gap:6px">
+          <input type="text" id="fnew" placeholder="имя_файла.yaml">
+          <button class="btn" onclick="fnewFile()">+ файл</button>
+          <button class="btn" onclick="fnewDir()">+ папка</button>
         </div>
       </div>
       <div class="card">
-        <div class="row" style="margin-bottom:8px">
-          <b id="fname" style="font-size:12px">файл не выбран</b>
-          <button class="btn primary" onclick="fsave()">Сохранить</button>
+        <div class="row" style="margin-bottom:8px;flex-wrap:wrap;gap:6px">
+          <b id="fname" style="font-size:12px;word-break:break-all">файл не выбран</b>
+          <span style="display:flex;gap:6px;flex-wrap:wrap">
+            <a class="btn" id="fdl" style="display:none;text-decoration:none">Скачать</a>
+            <button class="btn" onclick="frename()">Переименовать</button>
+            <button class="btn primary" onclick="fsave()">Сохранить</button>
+          </span>
         </div>
         <textarea id="fcontent" spellcheck="false" placeholder="Выбери файл слева"></textarea>
         <div class="row" style="margin-top:10px">
           <span class="muted" id="fmeta"></span>
-          <button class="btn danger" onclick="fdel()">Удалить файл</button>
+          <button class="btn danger" onclick="fdel()">Удалить</button>
         </div>
       </div>
     </div>
@@ -567,7 +643,7 @@ function render(){
     'HA ' + (c.version||'?') + ' · Supervisor ' + (s.version||'?') + ' · ' + (h.operating_system||'') +
     ' · панель v' + (STATE.version||'?') +
     ((STATE.errors&&STATE.errors.length) ? ' · ошибки: ' + STATE.errors.join(', ') : '');
-  renderApps(); renderSystem(); renderBackups(); renderRepos();
+  renderApps(); renderSystem(); renderBackups(); renderRepos(); renderRoots();
 }
 
 async function load(){
@@ -660,6 +736,12 @@ function toggleFollow(){
 }
 
 /* --- файлы --- */
+function renderRoots(){
+  const box = document.getElementById('froots');
+  box.innerHTML = (STATE.file_roots||[]).map(r =>
+    '<button class="chip" data-root="' + esc(r) + '">' + esc(r) + '</button>').join('');
+  box.querySelectorAll('.chip').forEach(b => b.onclick = () => fload(b.dataset.root));
+}
 async function fload(path){
   try {
     const d = await api('api/files?path=' + encodeURIComponent(path));
@@ -684,6 +766,9 @@ async function fopen(path){
     document.getElementById('fname').textContent = d.path;
     document.getElementById('fcontent').value = d.content;
     document.getElementById('fmeta').textContent = fmtSize(d.size) + (d.size > 512*1024 ? ' (показаны первые 512 КБ)' : '');
+    const dl = document.getElementById('fdl');
+    dl.href = BASE + 'api/files/download?path=' + encodeURIComponent(d.path);
+    dl.style.display = '';
   } catch(e){ toast('Ошибка: ' + e.message, true); }
 }
 async function fsave(){
@@ -705,19 +790,59 @@ async function fnewFile(){
     fload(CURDIR); fopen(p);
   } catch(e){ toast('Ошибка: ' + e.message, true); }
 }
+async function fnewDir(){
+  const name = prompt('Имя новой папки:');
+  if (!name) return;
+  try {
+    await api('api/files/mkdir', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path: CURDIR.replace(/\/$/,'') + '/' + name})});
+    toast('Папка создана'); fload(CURDIR);
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
+async function frename(){
+  if (!CURFILE) return toast('Файл не выбран', true);
+  const name = prompt('Новое имя:', CURFILE.split('/').pop());
+  if (!name) return;
+  try {
+    await api('api/files/rename', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({path: CURFILE, name: name})});
+    toast('Переименовано'); fload(CURDIR); fopen(CURDIR.replace(/\/$/,'') + '/' + name);
+  } catch(e){ toast('Ошибка: ' + e.message, true); }
+}
 async function fdel(){
-  if (!CURFILE) return;
+  if (!CURFILE) return toast('Файл не выбран', true);
   if (!confirm('Удалить ' + CURFILE + '?')) return;
   try {
     await api('api/files?path=' + encodeURIComponent(CURFILE), {method:'DELETE'});
     toast('Удалён'); CURFILE = null;
     document.getElementById('fname').textContent = 'файл не выбран';
     document.getElementById('fcontent').value = '';
+    document.getElementById('fmeta').textContent = '';
+    document.getElementById('fdl').style.display = 'none';
     fload(CURDIR);
   } catch(e){ toast('Ошибка: ' + e.message, true); }
 }
+async function fuploadFiles(files, dir){
+  for (const f of files) {
+    toast('Загружаю ' + f.name + ' (' + fmtSize(f.size) + ')…');
+    try {
+      const r = await fetch(BASE + 'api/files/upload?path=' + encodeURIComponent(dir) +
+                            '&name=' + encodeURIComponent(f.name),
+                            {method:'POST', body:f, headers:{'Content-Type':'application/octet-stream'}});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+      toast('Загружен: ' + f.name);
+    } catch(e) { toast('Ошибка ' + f.name + ': ' + e.message, true); break; }
+  }
+  fload(dir);
+}
 
 function closeModal(){ document.getElementById('modal').classList.remove('open'); }
+document.getElementById('fupload').onchange = e => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (files.length) fuploadFiles(files, CURDIR);
+};
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
@@ -860,11 +985,55 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": err})
             return self._json(200, res)
 
+        if path == "/api/files/download":
+            qs = parse_qs(urlparse(self.path).query)
+            real, err = safe_path(qs.get("path", [""])[0])
+            if err or not os.path.isfile(real):
+                return self._json(400, {"error": err or "не файл"})
+            size = os.path.getsize(real)
+            name = os.path.basename(real)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition",
+                             "attachment; filename=\"%s\"; filename*=UTF-8''%s"
+                             % (quote(name, safe=""), quote(name)))
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                with open(real, "rb") as fh:
+                    while True:
+                        chunk = fh.read(CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
         return self._json(404, {"error": "not found", "path": path})
 
     # --- POST ---
     def do_POST(self):
         path = self._path()
+
+        # Загрузка файла: тело запроса — сырые байты, поэтому обрабатываем до _body()
+        if path == "/api/files/upload":
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0:
+                return self._json(400, {"error": "пустой файл"})
+            if length > MAX_UPLOAD:
+                return self._json(413, {"error": "файл больше %d МБ" % (MAX_UPLOAD // 1048576)})
+            dest, err = file_upload(qs.get("path", [""])[0],
+                                    qs.get("name", [""])[0], length, self.rfile)
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, {"ok": True, "path": dest, "size": length})
+
         try:
             body = self._body()
         except ValueError:
@@ -915,6 +1084,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/files/mkdir":
             err = file_mkdir(str(body.get("path") or ""))
+            if err:
+                return self._json(400, {"error": err})
+            return self._json(200, {"ok": True})
+
+        if path == "/api/files/rename":
+            err = file_rename(str(body.get("path") or ""), str(body.get("name") or ""))
             if err:
                 return self._json(400, {"error": err})
             return self._json(200, {"ok": True})

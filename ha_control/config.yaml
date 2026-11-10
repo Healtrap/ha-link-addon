@@ -1,7 +1,7 @@
 ﻿name: HA Control
-version: "0.2.2"
+version: "0.3.0"
 slug: ha_control
-description: Remote panel - apps, store, logs, backups, files, host control
+description: Remote panel - apps, store, logs, backups, full file access, host control
 url: https://github.com/Healtrap/ha-link-addon
 arch:
   - aarch64
@@ -23,8 +23,16 @@ map:
     path: /config
   - type: share
     read_only: false
+  - type: media
+    read_only: false
   - type: ssl
-    read_only: true
+    read_only: false
+  - type: backup
+    read_only: false
+  - type: all_app_configs
+    read_only: false
+  - type: local_apps
+    read_only: false
 image: ghcr.io/healtrap/ha-link-addon/ha_control-{arch}
 options: {}
 schema: {}
