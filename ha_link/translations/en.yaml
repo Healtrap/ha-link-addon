@@ -14,3 +14,11 @@ configuration:
   files_domain:
     name: Files domain
     description: Public host name for the file service (must point to the relay VPS).
+  ssh_port:
+    name: SSH port on relay
+    description: >-
+      Port on the VPS for emergency SSH access to this host (e.g. 2222).
+      0 = disabled. The port must be opened on the VPS in ufw.
+  ssh_local_port:
+    name: Local SSH port
+    description: SSH port on Home Assistant itself (Advanced SSH add-on). Usually 22.

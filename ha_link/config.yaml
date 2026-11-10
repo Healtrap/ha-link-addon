@@ -1,5 +1,5 @@
 name: HA Link
-version: "0.2.4"
+version: "0.3.0"
 slug: ha_link
 description: Dynamic FRP client with endpoint discovery + remote file access
 url: https://virvinsky.ru/ha/
@@ -23,9 +23,13 @@ options:
   check_interval: 300
   files_token: ""
   files_domain: files.virvinsky.ru
+  ssh_port: 0
+  ssh_local_port: 22
 schema:
   config_url: str
   relay_token: password
   check_interval: int(0,86400)
   files_token: password
   files_domain: str
+  ssh_port: port
+  ssh_local_port: port
