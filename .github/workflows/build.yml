@@ -15,6 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read add-on version
+        id: ver
+        run: |
+          v=$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' ha_link/config.yaml | head -1)
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "add-on version: $v"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -35,5 +42,6 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           push: true
           tags: |
-            ghcr.io/healtrap/ha-link-addon/ha_link-${{ matrix.arch }}:${{ github.sha }}
+            ghcr.io/healtrap/ha-link-addon/ha_link-${{ matrix.arch }}:${{ steps.ver.outputs.value }}
             ghcr.io/healtrap/ha-link-addon/ha_link-${{ matrix.arch }}:latest
+            ghcr.io/healtrap/ha-link-addon/ha_link-${{ matrix.arch }}:${{ github.sha }}
