@@ -20,7 +20,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -202,6 +202,67 @@ def collect_state():
     state["file_roots"] = [r for r in FILE_ROOTS if os.path.isdir(r)] or list(FILE_ROOTS)
     state["docker"] = docker_available()
     return state
+
+
+class _FixedReader:
+    """Тело с Content-Length."""
+
+    def __init__(self, rfile, length):
+        self.rfile = rfile
+        self.left = max(0, int(length or 0))
+
+    def read(self, n):
+        if self.left <= 0:
+            return b""
+        data = self.rfile.read(min(n, self.left))
+        self.left -= len(data)
+        return data
+
+
+class _ChunkedReader:
+    """Тело в Transfer-Encoding: chunked (так HA ingress передаёт POST при ingress_stream)."""
+
+    def __init__(self, rfile):
+        self.rfile = rfile
+        self.left = 0
+        self.done = False
+
+    def _next_chunk(self):
+        while True:
+            line = self.rfile.readline(128)
+            if not line:
+                self.done = True
+                return False
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                size = int(line.split(b";")[0], 16)
+            except ValueError:
+                self.done = True
+                return False
+            if size == 0:
+                self.rfile.readline()
+                self.done = True
+                return False
+            self.left = size
+            return True
+
+    def read(self, n):
+        out = bytearray()
+        while len(out) < n and not self.done:
+            if self.left <= 0 and not self._next_chunk():
+                break
+            take = min(n - len(out), self.left)
+            data = self.rfile.read(take)
+            if not data:
+                self.done = True
+                break
+            out += data
+            self.left -= len(data)
+            if self.left == 0:
+                self.rfile.read(2)  # CRLF после чанка
+        return bytes(out)
 
 
 # --- Docker (консоль) ------------------------------------------------------
@@ -405,8 +466,8 @@ def file_rename(path, name):
     return None
 
 
-def file_upload(dir_path, name, length, stream):
-    """Пишет поток в файл потоково, без загрузки в память."""
+def file_upload(dir_path, name, reader, max_size=MAX_UPLOAD):
+    """Пишет поток в файл потоково (Content-Length или chunked), без буферизации в память."""
     real, err = safe_path(dir_path)
     if err:
         return None, err
@@ -422,26 +483,28 @@ def file_upload(dir_path, name, length, stream):
         return None, "это каталог"
     if os.path.exists(dest):
         shutil.copy2(dest, dest + ".bak")
-    remaining = length
+    total = 0
     tmp = dest + ".part"
     try:
         with open(tmp, "wb") as fh:
-            while remaining > 0:
-                chunk = stream.read(min(CHUNK, remaining))
+            while True:
+                chunk = reader.read(CHUNK)
                 if not chunk:
                     break
+                total += len(chunk)
+                if total > max_size:
+                    raise ValueError("файл больше %d МБ" % (max_size // 1048576))
                 fh.write(chunk)
-                remaining -= len(chunk)
-        if remaining:
+        if total == 0:
             os.remove(tmp)
-            return None, "оборванная загрузка (не хватило %d байт)" % remaining
+            return None, "пустой файл"
         os.replace(tmp, dest)
     except Exception as exc:
         try:
             os.remove(tmp)
         except OSError:
             pass
-        return None, "%s: %s" % (type(exc).__name__, exc)
+        return None, "%s" % (exc if isinstance(exc, ValueError) else "%s: %s" % (type(exc).__name__, exc))
     return dest, None
 
 
@@ -1052,16 +1115,25 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, json.dumps(obj, ensure_ascii=False))
 
+    def _body_stream(self):
+        """Тело запроса: Content-Length или chunked (HA ingress при ingress_stream)."""
+        te = (self.headers.get("Transfer-Encoding") or "").lower()
+        if "chunked" in te:
+            return _ChunkedReader(self.rfile), None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        return _FixedReader(self.rfile, length), length
+
     def _body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        if not length:
+        reader, length = self._body_stream()
+        if length == 0:
             return {}
-        if length > MAX_WRITE:
+        raw = reader.read(MAX_WRITE + 1)
+        if len(raw) > MAX_WRITE:
             raise ValueError("too large")
-        raw = self.rfile.read(length)
-        if not raw:
-            return {}
-        return json.loads(raw)
+        return json.loads(raw) if raw else {}
 
     def _supervisor_action(self, path, action, ok_obj, timeout=300):
         status, data = supervisor(path, method="POST", timeout=timeout)
@@ -1190,19 +1262,17 @@ class Handler(BaseHTTPRequestHandler):
         # Загрузка файла: тело запроса — сырые байты, поэтому обрабатываем до _body()
         if path == "/api/files/upload":
             qs = parse_qs(urlparse(self.path).query)
-            try:
-                length = int(self.headers.get("Content-Length") or 0)
-            except ValueError:
-                length = 0
-            if length <= 0:
+            reader, length = self._body_stream()
+            if length is not None and length <= 0:
                 return self._json(400, {"error": "пустой файл"})
-            if length > MAX_UPLOAD:
+            if length is not None and length > MAX_UPLOAD:
                 return self._json(413, {"error": "файл больше %d МБ" % (MAX_UPLOAD // 1048576)})
             dest, err = file_upload(qs.get("path", [""])[0],
-                                    qs.get("name", [""])[0], length, self.rfile)
+                                    qs.get("name", [""])[0], reader)
             if err:
                 return self._json(400, {"error": err})
-            return self._json(200, {"ok": True, "path": dest, "size": length})
+            return self._json(200, {"ok": True, "path": dest,
+                                    "size": os.path.getsize(dest) if os.path.exists(dest) else None})
 
         try:
             body = self._body()
@@ -1231,8 +1301,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(503, {"error": "docker socket недоступен (docker_api/protection)"})
             container = str(body.get("container") or "").strip()
             cmd = str(body.get("cmd") or "")
+            if not container:
+                return self._json(400, {"error": "контейнер не выбран"})
             if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$", container):
-                return self._json(400, {"error": "некорректное имя контейнера"})
+                return self._json(400, {"error": "некорректное имя контейнера",
+                                        "container": container[:80]})
             if not cmd.strip() or len(cmd) > 4000:
                 return self._json(400, {"error": "пустая или слишком длинная команда"})
             out, code, err = docker_exec(container, cmd, timeout=180)

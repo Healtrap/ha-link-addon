@@ -1,5 +1,5 @@
 name: HA Control
-version: "0.4.0"
+version: "0.4.1"
 slug: ha_control
 description: Remote panel - apps, store, logs, backups, full file access, host control
 url: https://github.com/Healtrap/ha-link-addon
