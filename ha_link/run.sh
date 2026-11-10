@@ -8,16 +8,6 @@ CHECK_INTERVAL=$(jq -r '.check_interval // 300' "$OPTIONS")
 FILES_TOKEN=$(jq -r '.files_token // empty' "$OPTIONS")
 FILES_DOMAIN=$(jq -r '.files_domain // "files.virvinsky.ru"' "$OPTIONS")
 FILES_PORT=8099
-SSH_PORT=$(jq -r '.ssh_port // 0' "$OPTIONS")
-SSH_LOCAL_PORT=$(jq -r '.ssh_local_port // 22' "$OPTIONS")
-
-# SSH-прокси: 0 — выключен. Порт на VPS должен быть открыт в ufw.
-case "$SSH_PORT" in
-  ''|*[!0-9]*) SSH_PORT=0 ;;
-esac
-case "$SSH_LOCAL_PORT" in
-  ''|*[!0-9]*) SSH_LOCAL_PORT=22 ;;
-esac
 
 # check_interval — секунды между проверками agent.json.
 # 0 — проверять только при старте. Минимум 30 с.
@@ -35,11 +25,6 @@ if [ -z "$RELAY_TOKEN" ] || [ "$RELAY_TOKEN" = "null" ]; then
 fi
 
 echo "Check interval: ${CHECK_INTERVAL}s (0 = only at startup)"
-if [ "$SSH_PORT" -gt 0 ]; then
-  echo "SSH proxy enabled: relay:${SSH_PORT} -> localhost:${SSH_LOCAL_PORT}"
-else
-  echo "SSH proxy disabled (ssh_port = 0)"
-fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -118,16 +103,6 @@ fetch_endpoint() {
   return 1
 }
 
-# --- HA Control panel proxy (so the browser panel is reachable remotely) -----
-CONTROL_ENABLED=0
-CONTROL_DOMAIN=$(jq -r '.control_domain // empty' "$OPTIONS")
-CONTROL_SLUG=$(jq -r '.control_slug // "ha_control"' "$OPTIONS")
-CONTROL_PORT=$(jq -r '.control_local_port // 8098' "$OPTIONS")
-if [ -n "$CONTROL_DOMAIN" ] && [ "$CONTROL_DOMAIN" != "null" ]; then
-  CONTROL_ENABLED=1
-  echo "Control panel proxy: $CONTROL_DOMAIN -> 127.0.0.1:${CONTROL_PORT} (${CONTROL_SLUG})"
-fi
-
 write_config() {
   cat > /tmp/frpc.toml <<EOF
 serverAddr = "$HOST"
@@ -157,32 +132,6 @@ transport.useEncryption = true
 transport.useCompression = true
 localIP = "127.0.0.1"
 localPort = $FILES_PORT
-EOF
-  fi
-  if [ "$CONTROL_ENABLED" = "1" ]; then
-    cat >> /tmp/frpc.toml <<EOF
-
-[[proxies]]
-name = "ha-control"
-type = "http"
-customDomains = ["$CONTROL_DOMAIN"]
-transport.useEncryption = true
-transport.useCompression = true
-localIP = "127.0.0.1"
-localPort = $CONTROL_PORT
-EOF
-  fi
-  if [ "$SSH_PORT" -gt 0 ]; then
-    cat >> /tmp/frpc.toml <<EOF
-
-[[proxies]]
-name = "ha-ssh"
-type = "tcp"
-transport.useEncryption = true
-transport.useCompression = true
-localIP = "127.0.0.1"
-localPort = $SSH_LOCAL_PORT
-remotePort = $SSH_PORT
 EOF
   fi
 }

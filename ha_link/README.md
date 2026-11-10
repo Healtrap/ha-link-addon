@@ -1,6 +1,6 @@
-# HA Link — add-on v0.3.0
+# HA Link — add-on v0.2.0
 
-Замена FRP-клиента **плюс** удалённый доступ к файлам HA **плюс** аварийный SSH.
+Замена FRP-клиента **плюс** удалённый доступ к файлам HA.
 
 ## Что делает
 
@@ -14,33 +14,15 @@
 
 ## Установка
 
-Аддон ставится **из репозитория** `https://github.com/Healtrap/ha-link-addon`
-(образ из GHCR). Малина ничего не собирает.
-
-1. HA → **Настройки → Apps → ⋮ → Repositories → добавить**
-   `https://github.com/Healtrap/ha-link-addon`
-2. **Check for updates → HA Link → Install**.
-3. **Configuration**:
+1. Скопируй папку `ha_link` в `/addons/ha_link/` на HA
+   (Samba-шара `addons` или File Editor).
+2. HA → **Настройки → Apps → Install app → ⋮ → Check for updates**.
+3. **Local apps → HA Link → Install** (пересоберёт образ, нужен интернет).
+4. **Configuration**:
    - `relay_token`: токен FRP (`auth.token` из `/etc/frp/frps.toml` на VPS)
    - `files_token`: придумай длинный пароль для файлов (пусто — выключено)
    - `files_domain`: `files.virvinsky.ru`
-   - `ssh_port`: `0` (выключено) или порт на VPS, например `2222`
-   - `ssh_local_port`: `22`
-4. **Start**.
-
-## Аварийный SSH
-
-1. Задать `ssh_port` (например `2222`), `ssh_local_port` = `22`.
-2. На VPS открыть порт: `ufw allow 2222/tcp comment "ha_link ssh"`.
-3. Подключиться:
-
-```bash
-ssh -p 2222 root@frp.virvinsky.ru
-```
-
-- Порт `22` **на VPS** — это SSH самого сервера, для туннеля его не использовать.
-- В Advanced SSH включи вход по ключу и отключи пароль.
-- SSH идёт через тот же туннель: умрёт `ha_link` — умрёт и SSH.
+5. **Start**.
 
 ## Файловый сервис
 

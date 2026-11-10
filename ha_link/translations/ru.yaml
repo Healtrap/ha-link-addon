@@ -14,11 +14,3 @@ configuration:
   files_domain:
     name: Домен файлов
     description: Публичное имя файлового сервиса (должно указывать на VPS-релей).
-  ssh_port:
-    name: SSH-порт на релее
-    description: >-
-      Порт на VPS для аварийного SSH к этой малине (например, 2222).
-      0 — выключено. Порт должен быть открыт на VPS в ufw.
-  ssh_local_port:
-    name: Локальный SSH-порт
-    description: Порт SSH на самом HA (Advanced SSH add-on). Обычно 22.
