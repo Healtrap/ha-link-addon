@@ -1,4 +1,4 @@
-﻿name: HA Control
+name: HA Control
 version: "0.3.1"
 slug: ha_control
 description: Remote panel - apps, store, logs, backups, full file access, host control
