@@ -103,64 +103,91 @@ def temperature():
     return None
 
 
+def _items(status, data, key):
+    """Достаёт список из ответа Supervisor, понимая обе формы: list и {key: list}."""
+    if status != 200 or not isinstance(data, dict):
+        return None
+    payload = data.get("data")
+    if isinstance(payload, dict):
+        payload = payload.get(key, [])
+    if not isinstance(payload, list):
+        return None
+    return payload
+
+
 def collect_state():
     state = {"version": VERSION, "errors": []}
 
     for key, path in (("host", "/host/info"), ("supervisor", "/supervisor/info"), ("core", "/core/info")):
         status, data = supervisor(path, timeout=20)
         if status == 200 and isinstance(data, dict):
-            state[key] = data.get("data", {})
+            state[key] = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         else:
             state[key] = {}
             state["errors"].append("%s: %s" % (path, status))
 
     addons = []
     status, data = supervisor("/addons", timeout=30)
-    if status == 200 and isinstance(data, dict):
-        for item in (data.get("data", {}) or {}).get("addons", []):
-            if not item.get("version"):
-                continue
-            addons.append({
-                "slug": item.get("slug", ""),
-                "name": item.get("name", item.get("slug", "")),
-                "version": item.get("version"),
-                "version_latest": item.get("version_latest"),
-                "state": item.get("state", "unknown"),
-                "boot": item.get("boot", ""),
-                "update_available": bool(item.get("update_available")),
-                "description": item.get("description", ""),
-            })
-    else:
+    items = _items(status, data, "addons")
+    if items is None:
         state["errors"].append("/addons: %s" % status)
+    for item in items or []:
+        if not isinstance(item, dict) or not item.get("version"):
+            continue
+        addons.append({
+            "slug": item.get("slug", ""),
+            "name": item.get("name", item.get("slug", "")),
+            "version": item.get("version"),
+            "version_latest": item.get("version_latest"),
+            "state": item.get("state", "unknown"),
+            "boot": item.get("boot", ""),
+            "update_available": bool(item.get("update_available")),
+            "description": item.get("description", ""),
+        })
     addons.sort(key=lambda a: a["name"].lower())
     state["addons"] = addons
 
     backups = []
     status, data = supervisor("/backups", timeout=30)
-    if status == 200 and isinstance(data, dict):
-        for item in (data.get("data", {}) or {}).get("backups", []):
-            backups.append({
-                "slug": item.get("slug", ""),
-                "name": item.get("name", ""),
-                "date": item.get("date", ""),
-                "type": item.get("type", ""),
-                "size_mb": round((item.get("size_bytes") or 0) / 1048576, 1),
-            })
-    else:
+    items = _items(status, data, "backups")
+    if items is None:
         state["errors"].append("/backups: %s" % status)
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        backups.append({
+            "slug": item.get("slug", ""),
+            "name": item.get("name", ""),
+            "date": item.get("date", ""),
+            "type": item.get("type", ""),
+            "size_mb": round((item.get("size_bytes") or 0) / 1048576, 1),
+        })
     backups.sort(key=lambda b: b["date"], reverse=True)
     state["backups"] = backups[:15]
 
     repos = []
     status, data = supervisor("/store/repositories", timeout=20)
-    if status == 200 and isinstance(data, dict):
-        for item in (data.get("data", {}) or {}).get("repositories", []):
-            repos.append({"slug": item.get("slug", ""), "name": item.get("name", ""),
-                          "url": item.get("url", "")})
+    items = _items(status, data, "repositories")
+    if items is None:  # старые версии: /store
+        status2, data2 = supervisor("/store", timeout=30)
+        items = _items(status2, data2, "repositories")
+    if items is None:
+        state["errors"].append("/store/repositories: %s" % status)
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        repos.append({"slug": item.get("slug", ""), "name": item.get("name", ""),
+                      "url": item.get("url") or item.get("source", "")})
     state["repositories"] = repos
 
-    state["mem"] = meminfo()
-    state["temp_c"] = temperature()
+    try:
+        state["mem"] = meminfo()
+    except Exception:
+        state["mem"] = {}
+    try:
+        state["temp_c"] = temperature()
+    except Exception:
+        state["temp_c"] = None
     try:
         state["loadavg"] = [round(x, 2) for x in os.getloadavg()]
     except Exception:
@@ -770,7 +797,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True, "version": VERSION})
 
         if path == "/api/state":
-            return self._json(200, collect_state())
+            try:
+                return self._json(200, collect_state())
+            except Exception as exc:
+                return self._json(200, {"version": VERSION, "errors": ["state: %s" % exc],
+                                        "host": {}, "supervisor": {}, "core": {},
+                                        "addons": [], "backups": [], "repositories": [],
+                                        "mem": {}, "temp_c": None, "loadavg": []})
 
         if path == "/api/logs":
             qs = parse_qs(urlparse(self.path).query)
