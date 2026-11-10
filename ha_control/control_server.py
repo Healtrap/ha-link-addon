@@ -17,7 +17,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "0.2.0"
+VERSION = "0.2.2"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -953,18 +953,24 @@ class Handler(BaseHTTPRequestHandler):
 
 # --- startup ---------------------------------------------------------------
 
-def ensure_panel():
-    """Включает панель в сайдбаре, если её выключили (флаг живёт в apps.json)."""
+def ensure_settings():
+    """Включает панель в сайдбаре и watchdog: оба флага живут в apps.json, по умолчанию off."""
     status, data = supervisor("/addons/self/info", timeout=20)
     if status != 200 or not isinstance(data, dict):
         return
-    info = data.get("data", {})
-    if not info.get("ingress"):
+    info = data.get("data", {}) or {}
+    body = {}
+    if info.get("ingress") and not info.get("ingress_panel"):
+        body["ingress_panel"] = True
+    if not info.get("watchdog"):
+        body["watchdog"] = True
+    if not body:
         return
-    if info.get("ingress_panel"):
-        return
-    supervisor("/addons/self/options", method="POST", payload={"ingress_panel": True}, timeout=60)
-    print("ingress_panel включён (панель появится в меню)", flush=True)
+    status, data = supervisor("/addons/self/options", method="POST", payload=body, timeout=60)
+    if status == 200:
+        print("включено: %s (панель в меню / watchdog)" % ", ".join(sorted(body)), flush=True)
+    else:
+        print("ensure_settings: %s -> %s" % (body, _msg(data)), flush=True)
 
 
 def main():
@@ -977,9 +983,9 @@ def main():
         print("FATAL: SUPERVISOR_TOKEN не задан (нужен hassio_api: true)", flush=True)
         sys.exit(1)
     try:
-        ensure_panel()
+        ensure_settings()
     except Exception as exc:
-        print("ensure_panel: %s" % exc, flush=True)
+        print("ensure_settings: %s" % exc, flush=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     print("HA Control %s listening on 0.0.0.0:%d" % (VERSION, PORT), flush=True)

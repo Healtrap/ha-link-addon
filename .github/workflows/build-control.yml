@@ -22,6 +22,16 @@ jobs:
           echo "value=$v" >> "$GITHUB_OUTPUT"
           echo "add-on version: $v"
 
+      - name: Verify VERSION constant matches manifest
+        run: |
+          v="${{ steps.ver.outputs.value }}"
+          c=$(sed -n 's/^VERSION = "\(.*\)"$/\1/p' ha_control/control_server.py | head -1)
+          echo "manifest: $v / code: $c"
+          if [ "$v" != "$c" ]; then
+            echo "::error::VERSION in control_server.py ($c) != version in config.yaml ($v)"
+            exit 1
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
