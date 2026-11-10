@@ -118,6 +118,16 @@ fetch_endpoint() {
   return 1
 }
 
+# --- HA Control panel proxy (so the browser panel is reachable remotely) -----
+CONTROL_ENABLED=0
+CONTROL_DOMAIN=$(jq -r '.control_domain // empty' "$OPTIONS")
+CONTROL_SLUG=$(jq -r '.control_slug // "ha_control"' "$OPTIONS")
+CONTROL_PORT=$(jq -r '.control_local_port // 8098' "$OPTIONS")
+if [ -n "$CONTROL_DOMAIN" ] && [ "$CONTROL_DOMAIN" != "null" ]; then
+  CONTROL_ENABLED=1
+  echo "Control panel proxy: $CONTROL_DOMAIN -> 127.0.0.1:${CONTROL_PORT} (${CONTROL_SLUG})"
+fi
+
 write_config() {
   cat > /tmp/frpc.toml <<EOF
 serverAddr = "$HOST"
@@ -147,6 +157,19 @@ transport.useEncryption = true
 transport.useCompression = true
 localIP = "127.0.0.1"
 localPort = $FILES_PORT
+EOF
+  fi
+  if [ "$CONTROL_ENABLED" = "1" ]; then
+    cat >> /tmp/frpc.toml <<EOF
+
+[[proxies]]
+name = "ha-control"
+type = "http"
+customDomains = ["$CONTROL_DOMAIN"]
+transport.useEncryption = true
+transport.useCompression = true
+localIP = "127.0.0.1"
+localPort = $CONTROL_PORT
 EOF
   fi
   if [ "$SSH_PORT" -gt 0 ]; then

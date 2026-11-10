@@ -25,6 +25,9 @@ options:
   files_domain: files.virvinsky.ru
   ssh_port: 0
   ssh_local_port: 22
+  control_domain: ""
+  control_slug: ha_control
+  control_local_port: 8098
 schema:
   config_url: str
   relay_token: password
@@ -33,3 +36,6 @@ schema:
   files_domain: str
   ssh_port: port
   ssh_local_port: port
+  control_domain: str
+  control_slug: str
+  control_local_port: port
