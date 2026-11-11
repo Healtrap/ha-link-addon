@@ -9,6 +9,13 @@ FILES_TOKEN=$(jq -r '.files_token // empty' "$OPTIONS")
 FILES_DOMAIN=$(jq -r '.files_domain // "files.virvinsky.ru"' "$OPTIONS")
 FILES_PORT=8099
 
+# Порт на VPS для SSH-прокси (0 — выключено). Схема — int(0,65535),
+# потому что 0 = «выключено», а тип port требует 1..65535.
+SSH_REMOTE_PORT=$(jq -r '.ssh_remote_port // 0' "$OPTIONS")
+case "$SSH_REMOTE_PORT" in
+  ''|*[!0-9]*) SSH_REMOTE_PORT=0 ;;
+esac
+
 # check_interval — секунды между проверками agent.json.
 # 0 — проверять только при старте. Минимум 30 с.
 case "$CHECK_INTERVAL" in
@@ -25,6 +32,24 @@ if [ -z "$RELAY_TOKEN" ] || [ "$RELAY_TOKEN" = "null" ]; then
 fi
 
 echo "Check interval: ${CHECK_INTERVAL}s (0 = only at startup)"
+if [ "$SSH_REMOTE_PORT" -gt 0 ]; then
+  echo "SSH proxy: relay:${SSH_REMOTE_PORT} -> 127.0.0.1:22"
+else
+  echo "SSH proxy disabled (ssh_remote_port = 0)"
+fi
+
+# --- Heartbeat для watchdog -------------------------------------------------
+# Файл обновляется раз в 10 с; /health отдаёт 200, только если он свежий.
+# Так Supervisor перезапускает зависший контейнер, но НЕ трогает аддон,
+# когда недоступен релей (иначе получился бы бесконечный цикл перезапусков).
+mkdir -p /data
+echo "$(date +%s)" > /data/hb
+(
+  while true; do
+    date +%s > /data/hb.tmp 2>/dev/null && mv /data/hb.tmp /data/hb 2>/dev/null
+    sleep 10
+  done
+) &
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -60,20 +85,27 @@ if [ ! -x /usr/local/bin/frpc ]; then
 fi
 
 # --- File service (web + WebDAV) -------------------------------------------
+# Сервис запускается ВСЕГДА: он же отдаёт /health для watchdog.
+# Если files_token не задан — генерируем случайный: снаружи сервис всё равно
+# не публикуется (FILES_ENABLED=0), а локальный /health продолжает работать.
 FILES_ENABLED=0
 if [ -n "$FILES_TOKEN" ] && [ "$FILES_TOKEN" != "null" ]; then
   FILES_ENABLED=1
-  export FILES_TOKEN FILES_DOMAIN FILES_PORT
-  export FILES_ROOTS="/config:/share:/addons"
-  (
-    while true; do
-      echo "Starting file service on 127.0.0.1:${FILES_PORT}"
-      python3 /files_server.py || true
-      echo "File service exited, restarting in 5s"
-      sleep 5
-    done
-  ) &
+else
+  FILES_TOKEN=$(head -c 24 /dev/urandom | base64 | tr -d '\n')
+  echo "files_token is empty: file service is private (only /health is served)"
 fi
+export FILES_TOKEN FILES_DOMAIN FILES_PORT
+export FILES_ROOTS="/config:/share:/addons"
+export FILES_HEALTH_FILE=/data/hb
+(
+  while true; do
+    echo "Starting file service on 0.0.0.0:${FILES_PORT}"
+    python3 /files_server.py || true
+    echo "File service exited, restarting in 5s"
+    sleep 5
+  done
+) &
 
 HOST=""
 PORT=""
@@ -132,6 +164,19 @@ transport.useEncryption = true
 transport.useCompression = true
 localIP = "127.0.0.1"
 localPort = $FILES_PORT
+EOF
+  fi
+  if [ "$SSH_REMOTE_PORT" -gt 0 ]; then
+    cat >> /tmp/frpc.toml <<EOF
+
+[[proxies]]
+name = "ha-ssh"
+type = "tcp"
+transport.useEncryption = true
+transport.useCompression = true
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = $SSH_REMOTE_PORT
 EOF
   fi
 }

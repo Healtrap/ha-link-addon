@@ -2,6 +2,9 @@ name: build-control
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - next
 
 jobs:
   build:
@@ -14,6 +17,18 @@ jobs:
         arch: [aarch64, amd64]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Lint (manifest, shell, tests)
+        run: |
+          set -e
+          python3 -m pip install --quiet pyyaml wsgidav cheroot
+          python3 tools/validate_manifest.py ha_link/config.yaml ha_control/config.yaml
+          python3 tools/test_validate_manifest.py
+          python3 tools/test_files_health.py
+          python3 tools/test_watchdog_flag.py
+          for f in $(find . -name '*.sh' -not -path './.git/*'); do
+            echo "sh -n $f"; sh -n "$f"
+          done
 
       - name: Read add-on version
         id: ver

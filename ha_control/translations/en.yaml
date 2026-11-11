@@ -1,0 +1,18 @@
+configuration:
+  control_token:
+    name: External access token
+    description: >-
+      Password for the panel when it is reached through the relay
+      (control.virvinsky.ru). Empty = ingress only.
+  ssh_enabled:
+    name: SSH server
+    description: >-
+      Built-in OpenSSH server on port 22. Replaces the Advanced SSH app.
+  ssh_authorized_keys:
+    name: SSH public keys
+    description: >-
+      One key per line (ssh-ed25519 AAAA... user@host). Recommended.
+  ssh_password:
+    name: SSH password for root
+    description: >-
+      Optional. Leave empty to allow key authentication only.

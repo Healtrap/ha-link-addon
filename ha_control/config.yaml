@@ -1,5 +1,5 @@
 name: HA Control
-version: "0.4.2"
+version: "0.6.0"
 slug: ha_control
 description: Remote panel - apps, store, logs, backups, full file access, host control
 url: https://github.com/Healtrap/ha-link-addon
@@ -15,6 +15,12 @@ panel_icon: mdi:tune-variant
 panel_title: HA Control
 panel_admin: true
 watchdog: http://[HOST]:[PORT:8099]/api/health
+# SSH-сервер внутри аддона заменяет сторонний Advanced SSH:
+# порт 22 хоста -> sshd в контейнере (ключи и/или пароль из опций).
+ports:
+  22/tcp: 22
+ports_description:
+  22/tcp: SSH (replaces the Advanced SSH app)
 hassio_api: true
 hassio_role: admin
 docker_api: true
@@ -35,5 +41,14 @@ map:
   - type: local_apps
     read_only: false
 image: ghcr.io/healtrap/ha-link-addon/ha_control-{arch}
-options: {}
-schema: {}
+options:
+  control_token: ""
+  ssh_enabled: true
+  ssh_authorized_keys: []
+  ssh_password: ""
+schema:
+  control_token: password
+  ssh_enabled: bool
+  ssh_authorized_keys:
+    - str
+  ssh_password: password

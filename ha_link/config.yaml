@@ -1,5 +1,5 @@
 name: HA Link
-version: "0.2.4"
+version: "0.4.0"
 slug: ha_link
 description: Dynamic FRP client with endpoint discovery + remote file access
 url: https://virvinsky.ru/ha/
@@ -9,6 +9,10 @@ arch:
 startup: application
 boot: auto
 host_network: true
+# Supervisor перезапускает аддон, если /health не отвечает 200.
+# /health отдаёт файловый сервис и проверяет только живость процесса,
+# а не связь с релеем: иначе падение VPS превратилось бы в цикл перезапусков.
+watchdog: http://[HOST]:[PORT:8099]/health
 dns:
   - 1.1.1.1
   - 8.8.8.8
@@ -23,9 +27,13 @@ options:
   check_interval: 300
   files_token: ""
   files_domain: files.virvinsky.ru
+  ssh_remote_port: 0
 schema:
   config_url: str
   relay_token: password
   check_interval: int(0,86400)
   files_token: password
   files_domain: str
+  # int(0,65535), а НЕ port: 0 значит «выключено», а схема port требует 1..65535.
+  # Именно на этом упал 0.3.1 (2026-11-11) — аддон не стартовал вообще.
+  ssh_remote_port: int(0,65535)

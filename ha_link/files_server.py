@@ -15,6 +15,8 @@ DOMAIN = os.environ.get("FILES_DOMAIN", "files.virvinsky.ru")
 PORT = int(os.environ.get("FILES_PORT", "8099"))
 MAX_UPLOAD = int(os.environ.get("FILES_MAX_UPLOAD", str(1024 * 1024 * 1024)))
 ROOTS = [r for r in os.environ.get("FILES_ROOTS", "/config:/share:/addons").split(":") if os.path.isdir(r)]
+HEALTH_FILE = os.environ.get("FILES_HEALTH_FILE", "/data/hb")
+HEALTH_MAX_AGE = int(os.environ.get("FILES_HEALTH_MAX_AGE", "60"))
 
 TEXT_EXT = {
     ".yaml", ".yml", ".json", ".txt", ".md", ".log", ".conf", ".cfg", ".ini", ".toml",
@@ -226,6 +228,11 @@ def web_app(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     ip = environ.get("REMOTE_ADDR", "-")
 
+    # /health — без авторизации, только для watchdog Supervisor.
+    # Отдаём минимум: живость контейнера, без токенов и путей.
+    if path == "/health":
+        return health_response(start_response)
+
     if path == "/login":
         if method == "POST":
             if not rate_ok(ip):
@@ -377,6 +384,19 @@ dav_config = {
 }
 
 dav_app = WsgiDAVApp(dav_config)
+
+
+def health_response(start_response):
+    """200, пока контейнер жив (heartbeat свежий). Не зависит от связи с релеем."""
+    age = None
+    try:
+        with open(HEALTH_FILE, "r", encoding="utf-8") as fh:
+            age = int(time.time() - float(fh.read().strip()))
+    except Exception:
+        age = None
+    if age is not None and 0 <= age <= HEALTH_MAX_AGE:
+        return send_json(start_response, {"ok": True, "age": age})
+    return send_json(start_response, {"ok": False, "age": age}, "503 Service Unavailable")
 
 
 def app(environ, start_response):

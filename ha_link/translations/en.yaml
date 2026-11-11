@@ -14,3 +14,8 @@ configuration:
   files_domain:
     name: Files domain
     description: Public host name for the file service (must point to the relay VPS).
+  ssh_remote_port:
+    name: SSH port on the relay (0 = off)
+    description: >-
+      TCP port on the relay VPS forwarded to 127.0.0.1:22 of the host
+      (the HA Control app's SSH server). 0 disables the SSH proxy.

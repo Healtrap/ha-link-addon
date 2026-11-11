@@ -1,0 +1,18 @@
+configuration:
+  control_token:
+    name: Токен внешнего доступа
+    description: >-
+      Пароль к панели при доступе через релей (control.virvinsky.ru).
+      Пусто — только ingress.
+  ssh_enabled:
+    name: SSH-сервер
+    description: >-
+      Встроенный OpenSSH на порту 22. Заменяет сторонний аддон Advanced SSH.
+  ssh_authorized_keys:
+    name: Публичные SSH-ключи
+    description: >-
+      По одному ключу в строке (ssh-ed25519 AAAA... user@host). Рекомендуется.
+  ssh_password:
+    name: Пароль SSH для root
+    description: >-
+      Необязательно. Пусто — вход только по ключам.

@@ -85,3 +85,32 @@
    (CI упадёт, если `VERSION` в `control_server.py` не совпадает).
 2. Actions → **build-control** → Run workflow.
 3. HA → **Настройки → Аддоны → HA Control → Обновить**.
+
+## SSH вместо стороннего Advanced SSH (v0.6.0)
+
+Внутри аддона работает собственный OpenSSH-сервер, поэтому Advanced SSH можно удалить.
+
+- порт **22 хоста** → sshd контейнера (`ports: 22/tcp: 22`);
+- опции: `ssh_enabled` (вкл/выкл), `ssh_authorized_keys` (список ключей),
+  `ssh_password` (необязательный пароль root);
+- host-ключи лежат в `/data/ssh` и переживают обновление аддона;
+- вход под `root`, работают `scp`/`sftp` (`internal-sftp`);
+- `ha` CLI доступен из шелла: обёртка прокидывает вызов в контейнер `hassio_cli`;
+- внутри доступны `/config`, `/share`, `/media`, `/ssl`, `/backup`, `/app_configs`,
+  `/local_apps` и docker-сокет (protection mode должен быть выключен).
+
+Проверка с ноутбука в той же сети:
+
+```
+ssh root@192.168.0.100 'ha core info | head -5'
+```
+
+Если Advanced SSH ещё установлен и запущен, порт 22 занят: сначала остановите или
+удалите его, иначе аддон не сможет стартовать.
+
+## Watchdog
+
+В манифесте задан `watchdog: http://[HOST]:[PORT:8099]/api/health`.
+Флаг «Watchdog» в настройках аддона панель включает сама при старте (и заодно
+включает его для `ha_link`), потому что без этого флага Supervisor не перезапускает
+упавший контейнер.

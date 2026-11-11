@@ -14,3 +14,8 @@ configuration:
   files_domain:
     name: Домен файлов
     description: Публичное имя файлового сервиса (должно указывать на VPS-релей).
+  ssh_remote_port:
+    name: Порт SSH на релее (0 — выключено)
+    description: >-
+      TCP-порт на VPS, проброшенный на 127.0.0.1:22 хоста (SSH-сервер аддона
+      HA Control). 0 отключает SSH-прокси.

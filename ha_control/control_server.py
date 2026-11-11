@@ -20,11 +20,15 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.4.2"
+VERSION = "0.6.0"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
 DOCKER_SOCK = os.environ.get("DOCKER_SOCK", "/var/run/docker.sock")
+# Внешний токен для доступа через туннель (control.virvinsky.ru).
+# Пусто — защита выключена (доступ только через ingress).
+API_TOKEN = os.environ.get("CONTROL_TOKEN", "").strip()
+TOKEN_COOKIE = "hactl"
 
 APP_ACTIONS = {"start", "stop", "restart", "update", "uninstall", "install"}
 CORE_ACTIONS = {"start", "stop", "restart", "update"}
@@ -36,6 +40,41 @@ FILE_ROOTS = tuple(x for x in os.environ.get(
 MAX_WRITE = 4 * 1024 * 1024
 MAX_UPLOAD = 2 * 1024 * 1024 * 1024
 CHUNK = 64 * 1024
+
+
+# --- Внешний доступ (токен) ------------------------------------------------
+
+def _token_ok(value):
+    """Сравнение токена за постоянное время."""
+    import hmac
+    return bool(API_TOKEN) and hmac.compare_digest(value or "", API_TOKEN)
+
+
+def _cookie_token(headers):
+    for part in (headers.get("Cookie") or "").split(";"):
+        k, _, v = part.strip().partition("=")
+        if k == TOKEN_COOKIE:
+            from urllib.parse import unquote
+            return unquote(v)
+    return ""
+
+
+def _request_authed(headers):
+    """Доступ разрешён, если токен пришёл в X-Token, Bearer или cookie."""
+    auth = (headers.get("Authorization") or "")
+    if auth.lower().startswith("bearer ") and _token_ok(auth[7:].strip()):
+        return True
+    if _token_ok(headers.get("X-Token") or ""):
+        return True
+    if _token_ok(_cookie_token(headers)):
+        return True
+    return False
+
+
+def _is_local(headers):
+    """Запрос пришёл через ingress/LAN, а не через туннель."""
+    return (headers.get("X-Ingress-Path") or "") != "" or (headers.get("X-Forwarded-Host") or "") == ""
+
 
 
 # --- Supervisor API --------------------------------------------------------
@@ -593,6 +632,26 @@ def file_upload(dir_path, name, reader, max_size=MAX_UPLOAD):
 
 
 # --- UI --------------------------------------------------------------------
+
+LOGIN_PAGE = r"""<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HA Control — вход</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;
+align-items:center;justify-content:center;height:100vh;margin:0}
+form{background:#1c1c1c;padding:24px;border-radius:12px;min-width:300px}
+input{width:100%;box-sizing:border-box;padding:10px;margin:12px 0;border-radius:8px;
+border:1px solid #444;background:#0d0d0d;color:#eee}
+button{width:100%;padding:10px;border:0;border-radius:8px;background:#03a9f4;color:#fff;font-size:15px}
+p{color:#f66;min-height:18px;margin:0}
+</style></head><body>
+<form method="get" action="/login">
+<h3>HA Control</h3>
+<input type="hidden" name="next" value="__NEXT__">
+<input type="password" name="token" placeholder="Токен" autofocus>
+<button type="submit">Войти</button><p>__ERR__</p>
+</form></body></html>"""
 
 PAGE = r"""<!DOCTYPE html>
 <html lang="ru">
@@ -1257,13 +1316,70 @@ class Handler(BaseHTTPRequestHandler):
     # --- GET ---
     def do_GET(self):
         path = self._path()
+
+        # Страница логина и приём токена — до проверки авторизации.
+        if path == "/login" or path == "/api/login":
+            if not API_TOKEN:
+                return self._send(200, PAGE, "text/html; charset=utf-8")
+            qs = parse_qs(urlparse(self.path).query)
+            supplied = qs.get("token", [""])[0]
+            next_url = qs.get("next", ["/"])[0] or "/"
+            if not next_url.startswith("/"):
+                next_url = "/"
+            if supplied and _token_ok(supplied):
+                from urllib.parse import quote as _q
+                from http.cookies import SimpleCookie
+                c = SimpleCookie()
+                c[TOKEN_COOKIE] = API_TOKEN
+                c[TOKEN_COOKIE]["path"] = "/"
+                c[TOKEN_COOKIE]["max-age"] = str(60 * 60 * 24 * 30)
+                c[TOKEN_COOKIE]["httponly"] = True
+                c[TOKEN_COOKIE]["secure"] = True
+                c[TOKEN_COOKIE]["samesite"] = "Lax"
+                self.send_response(303)
+                self.send_header("Location", next_url)
+                self.send_header("Set-Cookie", c.output(header="").strip())
+                self.end_headers()
+                return
+            return self._send(200, LOGIN_PAGE.replace("__NEXT__", next_url)
+                              .replace("__ERR__", "" if not supplied else "Неверный токен"),
+                              "text/html; charset=utf-8")
+
         if not path.startswith("/api/"):
             if path == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")
+            if API_TOKEN and not _request_authed(self.headers):
+                from urllib.parse import quote as _q
+                self.send_response(303)
+                self.send_header("Location", "/login?next=" + _q(self.path))
+                self.end_headers()
+                return
             return self._send(200, PAGE, "text/html; charset=utf-8")
 
         if path == "/api/health":
             return self._json(200, {"ok": True, "version": VERSION})
+
+        if API_TOKEN and not _request_authed(self.headers):
+            return self._json(401, {"error": "unauthorized"})
+
+        if path == "/api/ssh":
+            # Состояние встроенного SSH: жив ли sshd, сколько ключей.
+            # Пароли и содержимое ключей не отдаём.
+            try:
+                with open("/data/ssh/authorized_keys", "r", encoding="utf-8") as fh:
+                    keys = sum(1 for line in fh if line.strip() and not line.startswith("#"))
+            except OSError:
+                keys = 0
+            return self._json(200, {
+                "ok": True,
+                "version": VERSION,
+                "port": 22,
+                "keys": keys,
+                "host_keys": sorted(
+                    name for name in ("ssh_host_ed25519_key", "ssh_host_rsa_key")
+                    if os.path.exists("/data/ssh/" + name)
+                ),
+            })
 
         if path == "/api/state":
             try:
@@ -1375,6 +1491,9 @@ class Handler(BaseHTTPRequestHandler):
     # --- POST ---
     def do_POST(self):
         path = self._path()
+
+        if API_TOKEN and not _request_authed(self.headers):
+            return self._json(401, {"error": "unauthorized"})
 
         # Загрузка файла: тело запроса — сырые байты, поэтому обрабатываем до _body()
         if path == "/api/files/upload":
@@ -1561,6 +1680,47 @@ def ensure_docker():
     supervisor("/addons/self/restart", method="POST", timeout=30)
 
 
+def ensure_watchdog(slug):
+    """Включает флаг watchdog у нашего аддона.
+
+    Флаг живёт в apps.json и по умолчанию выключен: без него Supervisor
+    НЕ перезапускает контейнер, даже если в манифесте есть watchdog-URL.
+    Опции отправляем целиком (как их отдал Supervisor), чтобы ничего не потерять.
+    """
+    status, data = supervisor("/addons/%s/info" % slug, timeout=20)
+    if status != 200 or not isinstance(data, dict):
+        return
+    info = data.get("data", {}) or {}
+    if not info.get("installed", False):
+        return
+    if info.get("watchdog"):
+        return
+    opts = dict(info.get("options") or {})
+    opts["watchdog"] = True
+    status, data = supervisor("/addons/%s/options" % slug, method="POST",
+                              payload=opts, timeout=60)
+    if status == 200:
+        print("watchdog включён: %s" % slug, flush=True)
+    else:
+        print("ensure_watchdog(%s): %s" % (slug, _msg(data)), flush=True)
+
+
+def sibling_slugs():
+    """Слаги наших аддонов в том же репозитории: <repo>_ha_link, <repo>_ha_control."""
+    status, data = supervisor("/addons/self/info", timeout=20)
+    if status != 200 or not isinstance(data, dict):
+        return []
+    me = (data.get("data", {}) or {}).get("slug") or ""
+    repo = None
+    for suffix in ("_ha_control", "_ha_link"):
+        if me.endswith(suffix):
+            repo = me[: -len(suffix)]
+            break
+    if not repo:
+        return []
+    return ["%s_ha_link" % repo, "%s_ha_control" % repo]
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1574,6 +1734,11 @@ def main():
         ensure_settings()
     except Exception as exc:
         print("ensure_settings: %s" % exc, flush=True)
+    for slug in sibling_slugs():
+        try:
+            ensure_watchdog(slug)
+        except Exception as exc:
+            print("ensure_watchdog(%s): %s" % (slug, exc), flush=True)
     try:
         ensure_docker()
     except Exception as exc:

@@ -1,0 +1,10 @@
+#!/bin/sh
+# `ha` внутри контейнера HA Control: тот же CLI, что у Supervisor.
+# Он живёт в контейнере hassio_cli, поэтому просто проксируем вызов туда.
+if [ "$(docker inspect -f '{{.State.Running}}' hassio_cli 2>/dev/null)" = "true" ]; then
+  exec docker exec -i hassio_cli ha "$@"
+fi
+
+echo "hassio_cli container is not running — cannot run 'ha $*'" >&2
+echo "Проверь: docker ps | grep hassio_cli" >&2
+exit 1
