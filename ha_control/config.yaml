@@ -46,9 +46,11 @@ options:
   ssh_enabled: true
   ssh_authorized_keys: []
   ssh_password: ""
+  selfheal_enabled: true
 schema:
   control_token: password
   ssh_enabled: bool
   ssh_authorized_keys:
     - str
   ssh_password: password
+  selfheal_enabled: bool

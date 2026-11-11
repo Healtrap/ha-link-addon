@@ -116,6 +116,11 @@ def main():
                          GOOD.replace("check_interval: 300", 'check_interval: "300"'),
                          True))
 
+    # 8. ключ схемы без значения по умолчанию — аддон не стартует после обновления
+    results.append(check("schema key without default rejected",
+                         GOOD.replace("  ssh_remote_port: 0\n", ""),
+                         True, "нет значения по умолчанию"))
+
     print("\n%d/%d passed" % (sum(results), len(results)))
     return 0 if all(results) else 1
 

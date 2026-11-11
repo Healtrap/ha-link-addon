@@ -240,7 +240,13 @@ def validate(path, errors, warnings):
         if key not in options:
             parsed = parse_type(spec)
             if parsed is None or not parsed[3]:
-                warnings.append("schema.%s: нет значения по умолчанию — пользователь обязан заполнить" % key)
+                # Это не стилистика: если у ключа схемы нет значения по умолчанию,
+                # после обновления Supervisor потребует заполнить его вручную,
+                # а до тех пор аддон не запустится. Для always-on аддона это
+                # означает потерю доступа. Поэтому — ошибка, а не предупреждение.
+                errors.append(
+                    "schema.%s: нет значения по умолчанию в options — после обновления "
+                    "аддон не запустится, пока пользователь не заполнит опцию" % key)
             continue
         check_value(options[key], spec, "options.%s" % key, errors)
 

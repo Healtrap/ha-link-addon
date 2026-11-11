@@ -26,6 +26,7 @@ jobs:
           python3 tools/test_validate_manifest.py
           python3 tools/test_files_health.py
           python3 tools/test_watchdog_flag.py
+          python3 tools/test_selfheal.py
           for f in $(find . -name '*.sh' -not -path './.git/*'); do
             echo "sh -n $f"; sh -n "$f"
           done

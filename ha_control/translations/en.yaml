@@ -16,3 +16,9 @@ configuration:
     name: SSH password for root
     description: >-
       Optional. Leave empty to allow key authentication only.
+  selfheal_enabled:
+    name: Self-healing
+    description: >-
+      Keeps the HA Link tunnel up: enables the watchdog flag, restores the last
+      working options if the Supervisor refuses to start the app, and starts a
+      stopped HA Link. Disable only for manual maintenance.

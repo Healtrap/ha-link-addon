@@ -10,9 +10,11 @@ read_opt() {
 if [ -f "$OPTIONS" ]; then
   CONTROL_TOKEN=$(read_opt control_token "")
   SSH_ENABLED=$(read_opt ssh_enabled true)
+  SELFHEAL_ENABLED=$(read_opt selfheal_enabled true)
 else
   CONTROL_TOKEN=""
   SSH_ENABLED=true
+  SELFHEAL_ENABLED=true
 fi
 
 # Порт фиксирован: на него смотрит ingress (ingress_port: 8099) и внешний
@@ -20,6 +22,7 @@ fi
 # при значении 8098 панель слушала бы не тот порт и ingress отдавал бы 502.
 export CONTROL_PORT=8099
 export CONTROL_TOKEN
+export SELFHEAL_ENABLED
 
 if [ -n "$CONTROL_TOKEN" ]; then
   echo "HA Control: external token enabled, listening on ${CONTROL_PORT}"

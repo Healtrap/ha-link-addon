@@ -13,6 +13,7 @@ import re
 import shutil
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1381,6 +1382,21 @@ class Handler(BaseHTTPRequestHandler):
                 ),
             })
 
+        if path == "/api/selfheal":
+            # Что делает страховка: флаги, снимки опций, подъём остановленных.
+            with _heal_lock:
+                state = {slug: dict(val) for slug, val in _heal_state.items()}
+            return self._json(200, {
+                "ok": True,
+                "version": VERSION,
+                "enabled": SELFHEAL_ENABLED,
+                "interval": SELFHEAL_INTERVAL,
+                "min_gap": SELFHEAL_MIN_GAP,
+                "max_per_hour": SELFHEAL_MAX_PER_HOUR,
+                "broken_versions": {k: sorted(v) for k, v in BROKEN_VERSIONS.items()},
+                "slugs": state,
+            })
+
         if path == "/api/state":
             try:
                 return self._json(200, collect_state())
@@ -1683,26 +1699,39 @@ def ensure_docker():
 def ensure_watchdog(slug):
     """Включает флаг watchdog у нашего аддона.
 
+    Эндпоинт `/addons/<slug>/options` принимает ТОЛЬКО
+    `{"options": {...}, "watchdog": bool, "boot": "auto"|...}` — лишние ключи
+    отклоняются (voluptuous PREVENT_EXTRA). Поэтому отправляем ровно
+    `{"watchdog": true}`: опции не трогаем вообще, чтобы ничего не потерять.
+
     Флаг живёт в apps.json и по умолчанию выключен: без него Supervisor
-    НЕ перезапускает контейнер, даже если в манифесте есть watchdog-URL.
-    Опции отправляем целиком (как их отдал Supervisor), чтобы ничего не потерять.
+    НЕ перезапускает упавший/остановленный контейнер, даже если в манифесте
+    есть watchdog-URL.
     """
     status, data = supervisor("/addons/%s/info" % slug, timeout=20)
     if status != 200 or not isinstance(data, dict):
-        return
+        return False
     info = data.get("data", {}) or {}
     if not info.get("installed", False):
-        return
-    if info.get("watchdog"):
-        return
-    opts = dict(info.get("options") or {})
-    opts["watchdog"] = True
+        return False
+
+    body = {}
+    if not info.get("watchdog"):
+        body["watchdog"] = True
+    # boot: manual — аддон не поднимется после перезагрузки HA.
+    # manual_only менять нельзя (Supervisor вернёт ошибку), поэтому только manual.
+    if info.get("boot") == "manual":
+        body["boot"] = "auto"
+    if not body:
+        return True
+
     status, data = supervisor("/addons/%s/options" % slug, method="POST",
-                              payload=opts, timeout=60)
+                              payload=body, timeout=60)
     if status == 200:
-        print("watchdog включён: %s" % slug, flush=True)
-    else:
-        print("ensure_watchdog(%s): %s" % (slug, _msg(data)), flush=True)
+        print("selfheal: включено %s для %s" % (", ".join(sorted(body)), slug), flush=True)
+        return True
+    print("ensure_watchdog(%s): %s -> %s" % (slug, body, _msg(data)), flush=True)
+    return False
 
 
 def sibling_slugs():
@@ -1719,6 +1748,227 @@ def sibling_slugs():
     if not repo:
         return []
     return ["%s_ha_link" % repo, "%s_ha_control" % repo]
+
+
+# --- self-heal -------------------------------------------------------------
+# Восстановление после сбоя идёт тремя независимыми уровнями:
+#   1. `boot: auto` + валидный манифест — Supervisor поднимает аддон при старте HA;
+#   2. флаг `watchdog` + watchdog-URL — Supervisor перезапускает контейнер,
+#      если тот остановился, упал или перестал отвечать на /health;
+#   3. этот блок — страховка на случай, когда не сработали первые два:
+#      панель сама поднимает остановленного «соседа» и, если Supervisor
+#      отказывается его запускать из-за опций, возвращает последний рабочий
+#      снимок опций (именно так падал ha_link 0.3.1: ssh_port: 0).
+
+SELFHEAL_DIR = os.environ.get("SELFHEAL_DIR", "/data/selfheal")
+SELFHEAL_INTERVAL = max(60, int(os.environ.get("SELFHEAL_INTERVAL", "300")))
+SELFHEAL_MIN_GAP = 120        # не чаще одной попытки в 2 минуты
+SELFHEAL_MAX_PER_HOUR = 5     # и не больше пяти попыток в час
+SELFHEAL_ENABLED = os.environ.get("SELFHEAL_ENABLED", "true").strip().lower() not in (
+    "0", "false", "no", "off", "")
+
+# Числовые опции, для которых 0 — допустимое значение («выключено»).
+# Нужны только для починки значений, из-за которых Supervisor отказывается
+# создавать контейнер. Ключи, которых здесь нет, не трогаем никогда.
+KNOWN_INT_RANGES = {
+    "ssh_remote_port": (0, 65535),
+    "check_interval": (0, 86400),
+}
+
+# Версии, которые не запускаются ни при каких опциях (битый манифест).
+# Для них единственное лечение — обновление из магазина.
+BROKEN_VERSIONS = {
+    "ha_link": {"0.3.1"},
+}
+
+_heal_lock = threading.Lock()
+_heal_state = {}  # slug -> {"attempts": [ts], "last": {...}}
+
+
+def known_problems(options):
+    """Проблемы в опциях, которые мы умеем распознать без Supervisor."""
+    if not isinstance(options, dict):
+        return ["options: ожидался объект"]
+    problems = []
+    for key, (lo, hi) in KNOWN_INT_RANGES.items():
+        if key not in options:
+            continue
+        val = options[key]
+        if isinstance(val, bool) or not isinstance(val, int):
+            problems.append("%s: ожидалось целое, получено %r" % (key, val))
+        elif not lo <= val <= hi:
+            problems.append("%s: %s вне диапазона %s..%s" % (key, val, lo, hi))
+    return problems
+
+
+def repair_options(options):
+    """Приводит известные числовые опции в допустимый диапазон.
+
+    Возвращает (новые_опции, список_изменений). Ничего не выдумывает:
+    только ограничивает число диапазоном. Нечисловое значение удаляется —
+    тогда Supervisor подставит значение по умолчанию из манифеста.
+    """
+    fixed = dict(options or {})
+    changed = []
+    for key, (lo, hi) in KNOWN_INT_RANGES.items():
+        if key not in fixed:
+            continue
+        val = fixed[key]
+        if isinstance(val, bool) or not isinstance(val, int):
+            del fixed[key]
+            changed.append("%s: %r -> default" % (key, val))
+        elif not lo <= val <= hi:
+            new = min(max(val, lo), hi)
+            fixed[key] = new
+            changed.append("%s: %s -> %s" % (key, val, new))
+    return fixed, changed
+
+
+def snapshot_path(slug):
+    return os.path.join(SELFHEAL_DIR, slug + ".options.json")
+
+
+def save_snapshot(slug, options, version):
+    """Сохраняет опции работающего аддона — это эталон для восстановления."""
+    if not isinstance(options, dict) or known_problems(options):
+        return
+    try:
+        os.makedirs(SELFHEAL_DIR, exist_ok=True)
+        tmp = snapshot_path(slug) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"version": version, "options": options}, fh, ensure_ascii=False)
+        os.chmod(tmp, 0o600)  # в опциях бывают токены
+        os.replace(tmp, snapshot_path(slug))
+    except OSError as exc:
+        print("selfheal: снимок %s не сохранён: %s" % (slug, exc), flush=True)
+
+
+def restore_snapshot(slug):
+    """Возвращает последние рабочие опции. None, если снимка нет или он плохой."""
+    try:
+        with open(snapshot_path(slug), "r", encoding="utf-8") as fh:
+            snap = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    opts = snap.get("options") if isinstance(snap, dict) else None
+    if not isinstance(opts, dict) or known_problems(opts):
+        return None
+    status, data = supervisor("/addons/%s/options" % slug, method="POST",
+                              payload={"options": opts}, timeout=60)
+    if status != 200:
+        print("selfheal: опции %s не восстановлены: %s" % (slug, _msg(data)), flush=True)
+        return None
+    print("selfheal: опции %s восстановлены из снимка %s"
+          % (slug, snap.get("version")), flush=True)
+    return opts
+
+
+def heal_allowed(slug, now=None):
+    """Ограничитель: не чаще SELFHEAL_MIN_GAP и не больше SELFHEAL_MAX_PER_HOUR."""
+    now = time.time() if now is None else now
+    with _heal_lock:
+        st = _heal_state.setdefault(slug, {"attempts": []})
+        st["attempts"] = [t for t in st["attempts"] if now - t < 3600]
+        if len(st["attempts"]) >= SELFHEAL_MAX_PER_HOUR:
+            return False
+        if st["attempts"] and now - st["attempts"][-1] < SELFHEAL_MIN_GAP:
+            return False
+        st["attempts"].append(now)
+        return True
+
+
+def addon_name(slug):
+    for suffix in ("_ha_link", "_ha_control"):
+        if slug.endswith(suffix):
+            return suffix[1:]
+    return ""
+
+
+def heal_once(slug):
+    """Один проход лечения одного аддона. Возвращает отчёт для /api/selfheal."""
+    status, data = supervisor("/addons/%s/info" % slug, timeout=20)
+    if status != 200 or not isinstance(data, dict):
+        return {"ok": False, "slug": slug, "error": "info: %s" % _msg(data)}
+    info = data.get("data") or {}
+    if not info.get("installed"):
+        return {"ok": True, "slug": slug, "state": "not_installed"}
+
+    ensure_watchdog(slug)
+
+    options = info.get("options") or {}
+    version = info.get("version") or ""
+    state = info.get("state") or "unknown"
+    report = {"ok": True, "slug": slug, "state": state, "version": version}
+
+    problems = known_problems(options)
+    if problems:
+        report["problems"] = problems
+        fixed, changed = repair_options(options)
+        if changed:
+            status, data = supervisor("/addons/%s/options" % slug, method="POST",
+                                      payload={"options": fixed}, timeout=60)
+            if status == 200:
+                print("selfheal: %s — исправлены опции: %s"
+                      % (slug, "; ".join(changed)), flush=True)
+                report["repaired"] = changed
+                options, problems = fixed, known_problems(fixed)
+            else:
+                print("selfheal: %s — опции не исправлены: %s"
+                      % (slug, _msg(data)), flush=True)
+
+    if state == "started":
+        if not problems:
+            save_snapshot(slug, options, version)
+        report["health"] = "running"
+        return report
+
+    # Аддон не работает. Если версия заведомо битая и есть обновление — обновляем.
+    if not heal_allowed(slug):
+        report["skipped"] = "rate limited"
+        return report
+
+    if version in BROKEN_VERSIONS.get(addon_name(slug), set()) and info.get("update_available"):
+        print("selfheal: %s %s — известная нерабочая версия, обновляю"
+              % (slug, version), flush=True)
+        status, data = supervisor("/addons/%s/update" % slug, method="POST", timeout=900)
+        report["update"] = status == 200
+        if status != 200:
+            print("selfheal: обновление %s не удалось: %s" % (slug, _msg(data)), flush=True)
+
+    status, data = supervisor("/addons/%s/start" % slug, method="POST", timeout=180)
+    if status != 200:
+        msg = _msg(data)
+        print("selfheal: %s не запустился: %s" % (slug, msg), flush=True)
+        report["error"] = msg
+        # Supervisor отказался из-за опций? Пробуем последний рабочий снимок.
+        if restore_snapshot(slug):
+            status, data = supervisor("/addons/%s/start" % slug, method="POST", timeout=180)
+            report["restored"] = status == 200
+            if status != 200:
+                report["error"] = _msg(data)
+                report["ok"] = False
+                return report
+    print("selfheal: %s запущен (было: %s)" % (slug, state), flush=True)
+    report["started"] = True
+    return report
+
+
+def heal_loop():
+    """Фоновый цикл. Первый проход — после старта панели, дальше раз в 5 минут."""
+    if not SELFHEAL_ENABLED:
+        print("selfheal: отключено опцией selfheal_enabled", flush=True)
+        return
+    time.sleep(20)
+    while True:
+        for slug in sibling_slugs():
+            try:
+                report = heal_once(slug)
+            except Exception as exc:  # noqa: BLE001 - цикл не должен умирать
+                report = {"ok": False, "slug": slug, "error": str(exc)}
+                print("selfheal(%s): %s" % (slug, exc), flush=True)
+            with _heal_lock:
+                _heal_state.setdefault(slug, {})["last"] = report
+        time.sleep(SELFHEAL_INTERVAL)
 
 
 def main():
@@ -1739,6 +1989,11 @@ def main():
             ensure_watchdog(slug)
         except Exception as exc:
             print("ensure_watchdog(%s): %s" % (slug, exc), flush=True)
+    # Страховка: поднимает остановленного «соседа» и чинит опции.
+    if SELFHEAL_ENABLED:
+        threading.Thread(target=heal_loop, name="selfheal", daemon=True).start()
+    else:
+        print("selfheal: отключено опцией selfheal_enabled", flush=True)
     try:
         ensure_docker()
     except Exception as exc:
