@@ -108,6 +108,20 @@ ssh root@192.168.0.100 'ha core info | head -5'
 Если Advanced SSH ещё установлен и запущен, порт 22 занят: сначала остановите или
 удалите его, иначе аддон не сможет стартовать.
 
+### Шелл на хосте HAOS (аналог «advanced mode» Advanced SSH)
+
+Из SSH-сессии аддона (у него есть docker-сокет) можно войти в хост:
+
+```
+docker run --rm -it --privileged --pid=host --net=host --ipc=host --uts=host \
+  alpine:3.20 nsenter -t 1 -m -u -i -n -p /bin/sh -l
+```
+
+Первый запуск скачает `alpine:3.20` (~4 МБ), дальше работает из кэша. Это полный
+доступ к HAOS: `ha`, `docker`, `/mnt/data`, `/etc`, systemd/s6. Обычные задачи
+(`/config`, `/share`, `/media`, бэкапы, `ha` CLI, reboot/shutdown) доступны и без
+него — через SSH и панель.
+
 ## Watchdog
 
 В манифесте задан `watchdog: http://[HOST]:[PORT:8099]/api/health`.
