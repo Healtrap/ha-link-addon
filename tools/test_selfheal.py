@@ -217,6 +217,22 @@ cs.heal_once(SLUG)
 check("bad options + failed repair -> no snapshot",
       not os.path.isfile(os.path.join(TMP, SLUG + ".options.json")))
 
+# 11. Апгрейд ha_control 0.5.0 -> 0.6.0: в опциях остался control_port (нет в схеме).
+#     Supervisor такие ключи игнорирует с предупреждением, поэтому это НЕ проблема
+#     и самолечение не должно ничего «чинить» (иначе можно потерять чужие опции).
+panel = "4f3d5ae8_ha_control"
+legacy = addon(state="started", version="0.6.0")
+legacy["options"] = {"control_token": "", "control_port": 8098, "ssh_enabled": True,
+                     "ssh_authorized_keys": [], "ssh_password": "",
+                     "selfheal_enabled": True}
+fake = reset({panel: legacy})
+rep = cs.heal_once(panel)
+check("legacy control_port -> not a problem", not rep.get("problems"), rep)
+check("legacy control_port -> no options POST",
+      not [c for c in fake.calls if c[0].endswith("/options") and c[1] == "POST"], fake.calls)
+check("legacy control_port -> snapshot saved",
+      os.path.isfile(os.path.join(TMP, panel + ".options.json")))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))
 raise SystemExit(0 if all(results) else 1)
