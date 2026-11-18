@@ -21,7 +21,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -1864,16 +1864,23 @@ def restore_snapshot(slug):
 
 
 def heal_allowed(slug, now=None):
-    """Ограничитель: не чаще SELFHEAL_MIN_GAP и не больше SELFHEAL_MAX_PER_HOUR."""
+    """Ограничитель: не чаще SELFHEAL_MIN_GAP и не больше SELFHEAL_MAX_PER_HOUR.
+
+    Важно: запись в `_heal_state` может уже существовать с ключом "last"
+    (его пишет heal_loop), поэтому нельзя делать setdefault(slug, {"attempts": []})
+    и брать st["attempts"] напрямую — это давало KeyError 'attempts'
+    и полностью отключало самолечение (баг 0.6.1).
+    """
     now = time.time() if now is None else now
     with _heal_lock:
-        st = _heal_state.setdefault(slug, {"attempts": []})
-        st["attempts"] = [t for t in st["attempts"] if now - t < 3600]
-        if len(st["attempts"]) >= SELFHEAL_MAX_PER_HOUR:
+        st = _heal_state.setdefault(slug, {})
+        attempts = st.setdefault("attempts", [])
+        attempts[:] = [t for t in attempts if now - t < 3600]
+        if len(attempts) >= SELFHEAL_MAX_PER_HOUR:
             return False
-        if st["attempts"] and now - st["attempts"][-1] < SELFHEAL_MIN_GAP:
+        if attempts and now - attempts[-1] < SELFHEAL_MIN_GAP:
             return False
-        st["attempts"].append(now)
+        attempts.append(now)
         return True
 
 

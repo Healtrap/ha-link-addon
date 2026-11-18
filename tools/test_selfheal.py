@@ -242,6 +242,22 @@ check("legacy control_port -> no options POST",
 check("legacy control_port -> snapshot saved",
       os.path.isfile(os.path.join(TMP, panel + ".options.json")))
 
+# 12. РЕГРЕССИЯ 0.6.1: heal_loop пишет в _heal_state[slug]["last"] ДО того,
+#     как heal_allowed() создаст "attempts". Раньше это давало KeyError 'attempts'
+#     и самолечение молча не работало (проверено на живой малине 2026-11-18).
+cs._heal_state.clear()
+cs._heal_state[SLUG] = {"last": {"ok": True, "slug": SLUG, "state": "started"}}
+check("heal_allowed with existing 'last' key", cs.heal_allowed(SLUG) is True,
+      cs._heal_state.get(SLUG))
+
+# 13. Полный сценарий петли: остановленный аддон + уже записанный 'last'
+fake = reset({SLUG: addon(state="error")})
+cs._heal_state[SLUG] = {"last": {"ok": True, "slug": SLUG, "state": "started"}}
+rep = cs.heal_once(SLUG)
+check("loop scenario: error state -> started", rep.get("started") is True, rep)
+check("loop scenario: attempts recorded", "attempts" in cs._heal_state[SLUG],
+      cs._heal_state.get(SLUG))
+
 shutil.rmtree(TMP, ignore_errors=True)
 print("\n%d/%d passed" % (sum(results), len(results)))
 raise SystemExit(0 if all(results) else 1)
