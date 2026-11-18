@@ -38,10 +38,15 @@ def make_supervisor(watchdog_flag, installed=True, boot="auto", options=None):
     def fake(path, method="GET", payload=None, timeout=30, raw=False):
         CALLS.append((path, method, payload))
         if path.endswith("/info"):
-            return 200, {"data": {"installed": installed,
-                                  "watchdog": watchdog_flag,
-                                  "boot": boot,
-                                  "options": dict(options or {})}}
+            data = {"watchdog": watchdog_flag, "boot": boot,
+                    "options": dict(options or {})}
+            if installed:
+                # как в реальном Supervisor 2026.11: ключа `installed` нет
+                data["state"] = "started"
+            else:
+                data["installed"] = False
+                data["state"] = "unknown"
+            return 200, {"data": data}
         if path.endswith("/options"):
             return 200, {"data": {}}
         return 404, {}

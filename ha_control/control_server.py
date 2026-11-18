@@ -21,7 +21,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 SUPERVISOR = os.environ.get("SUPERVISOR_URL", "http://supervisor").rstrip("/")
 TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 PORT = int(os.environ.get("CONTROL_PORT", "8099"))
@@ -1712,7 +1712,7 @@ def ensure_watchdog(slug):
     if status != 200 or not isinstance(data, dict):
         return False
     info = data.get("data", {}) or {}
-    if not info.get("installed", False):
+    if not addon_present(info):
         return False
 
     body = {}
@@ -1884,13 +1884,26 @@ def addon_name(slug):
     return ""
 
 
+def addon_present(info):
+    """Установлен ли аддон.
+
+    В Supervisor 2026.11 `/addons/<slug>/info` НЕ отдаёт ключ `installed`
+    у установленных аддонов (его нет вовсе), а у неустановленных отдаёт
+    `installed: false` и `state: "unknown"`. Поэтому проверять «на ложность»
+    нельзя — иначе все аддоны выглядят неустановленными (реальный баг 0.6.0).
+    """
+    if info.get("installed") is False:
+        return False
+    return info.get("state") not in (None, "unknown")
+
+
 def heal_once(slug):
     """Один проход лечения одного аддона. Возвращает отчёт для /api/selfheal."""
     status, data = supervisor("/addons/%s/info" % slug, timeout=20)
     if status != 200 or not isinstance(data, dict):
         return {"ok": False, "slug": slug, "error": "info: %s" % _msg(data)}
     info = data.get("data") or {}
-    if not info.get("installed"):
+    if not addon_present(info):
         return {"ok": True, "slug": slug, "state": "not_installed"}
 
     ensure_watchdog(slug)

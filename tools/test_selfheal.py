@@ -88,8 +88,10 @@ class FakeSup:
 
 
 def addon(state="started", version="0.4.0", **kw):
+    # ВАЖНО: у установленного аддона Supervisor НЕ отдаёт ключ `installed`
+    # (проверено на живой малине 2026-11-18). Ключ есть только со значением
+    # False у неустановленных.
     data = {
-        "installed": True,
         "state": state,
         "version": version,
         "version_latest": version,
@@ -124,10 +126,17 @@ def reset(addons, **kw):
 SLUG = "4f3d5ae8_ha_link"
 
 # 1. не установлен -> ничего не делаем
-fake = reset({SLUG: addon(installed=False)})
+fake = reset({SLUG: addon(installed=False, state="unknown")})
 rep = cs.heal_once(SLUG)
 check("not installed -> skip", rep.get("state") == "not_installed", rep)
 check("not installed -> no start", not [c for c in fake.calls if c[0].endswith("/start")], fake.calls)
+
+# 1b. форма ответа Supervisor: у установленных нет ключа `installed`
+check("addon_present: installed (no key)", cs.addon_present({"state": "stopped"}) is True)
+check("addon_present: installed (started)", cs.addon_present({"state": "started"}) is True)
+check("addon_present: not installed",
+      cs.addon_present({"installed": False, "state": "unknown"}) is False)
+check("addon_present: unknown state", cs.addon_present({"state": "unknown"}) is False)
 
 # 2. работает -> снимок сохранён, старт не вызывается
 fake = reset({SLUG: addon()})
