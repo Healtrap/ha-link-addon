@@ -98,7 +98,12 @@ cs.supervisor = lambda path, **kw: (200, {"data": {"slug": "4f3d5ae8_ha_control"
 check("sibling slugs", cs.sibling_slugs() == ["4f3d5ae8_ha_link", "4f3d5ae8_ha_control"],
       cs.sibling_slugs())
 
-check("VERSION is 0.6.0", cs.VERSION == "0.6.0", cs.VERSION)
+import yaml
+
+_manifest = yaml.safe_load(open(os.path.join(HERE, "ha_control", "config.yaml"),
+                               encoding="utf-8"))
+check("VERSION matches manifest", cs.VERSION == _manifest["version"],
+      (cs.VERSION, _manifest["version"]))
 
 print("\n%d/%d passed" % (sum(results), len(results)))
 raise SystemExit(0 if all(results) else 1)
