@@ -1,0 +1,19 @@
+configuration:
+  interval_minutes:
+    name: Интервал публикации (минуты)
+    description: Как часто отправлять статус дома в файл на домене.
+  ftp_host:
+    name: FTP-хост
+    description: FTP-сервер хостинга для beacon.json.
+  ftp_user:
+    name: FTP-пользователь
+  ftp_pass:
+    name: FTP-пароль
+  ftp_path:
+    name: Каталог на FTP
+    description: Например, public_html/ha
+  public_url:
+    name: Публичный адрес
+    description: Где будет доступен beacon.json (для приложения).
+network:
+  8097/tcp: Health-эндпоинт для watchdog Supervisor

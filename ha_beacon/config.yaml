@@ -1,0 +1,33 @@
+name: HA Beacon
+version: "0.1.0"
+slug: ha_beacon
+description: Publishes a small house-status heartbeat to a domain file, independent of the relay VPS
+url: https://github.com/Healtrap/ha-link-addon
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+init: false
+watchdog: http://[HOST]:[PORT:8097]/health
+ingress: true
+ingress_port: 8097
+panel_icon: mdi:access-point-network
+panel_title: HA Beacon
+hassio_api: true
+hassio_role: default
+image: ghcr.io/healtrap/ha-link-addon/ha_beacon-{arch}
+options:
+  interval_minutes: 5
+  ftp_host: vh330.timeweb.ru
+  ftp_user: ""
+  ftp_pass: ""
+  ftp_path: public_html/ha
+  public_url: https://virvinsky.ru/ha/beacon.json
+schema:
+  interval_minutes: int(1,60)
+  ftp_host: str
+  ftp_user: str
+  ftp_pass: password
+  ftp_path: str
+  public_url: str

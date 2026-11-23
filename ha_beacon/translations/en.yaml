@@ -1,0 +1,19 @@
+configuration:
+  interval_minutes:
+    name: Publish interval (minutes)
+    description: How often to send the heartbeat to the domain file.
+  ftp_host:
+    name: FTP host
+    description: Hosting FTP server for beacon.json.
+  ftp_user:
+    name: FTP user
+  ftp_pass:
+    name: FTP password
+  ftp_path:
+    name: FTP directory
+    description: Directory on the hosting, e.g. public_html/ha
+  public_url:
+    name: Public URL
+    description: Where the beacon file will be available (for the app).
+network:
+  8097/tcp: Health endpoint for the supervisor watchdog
