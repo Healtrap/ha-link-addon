@@ -92,19 +92,32 @@ def num(value, digits=1):
         return None
 
 
-def relay_online():
-    """Проверяет, живой ли релей (VPS/туннель) — независимо от FTP и HA."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+def _relay_once(ctx):
     req = urllib.request.Request(RELAY_URL, headers={"User-Agent": "ha-beacon"})
     try:
-        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=6, context=ctx) as resp:
             return resp.status in (200, 401, 403)
     except urllib.error.HTTPError as error:
         return error.code in (200, 401, 403)
     except Exception:  # noqa: BLE001
         return False
+
+
+def relay_online(attempts=3, delay=3):
+    """Проверяет, живой ли релей (VPS/туннель) — независимо от FTP и HA.
+
+    Туннель иногда переподключается на 1-2 секунды, поэтому одной пробы мало:
+    делаем до трёх попыток и считаем релей живым, если ответила хоть одна.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for attempt in range(attempts):
+        if _relay_once(ctx):
+            return True
+        if attempt < attempts - 1:
+            time.sleep(delay)
+    return False
 
 
 def build_payload():
