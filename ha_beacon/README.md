@@ -52,3 +52,12 @@
 
 Образ: `ghcr.io/healtrap/ha-link-addon/ha_beacon-{arch}`.
 Собирается GitHub Actions из `addons/ha_beacon` (workflow `build-beacon.yml`).
+
+## Права
+
+- `homeassistant_api: true` — читать `/core/api/states` и `/core/api/config`
+  (температуры, состояния, версия HA);
+- `hassio_api: true`, `hassio_role: default` — смотреть состояния аддонов
+  `ha_link`/`ha_control`;
+- FTP-доступ к хостингу задаётся опциями (логин/пароль), ничего не хранится
+  в образе.

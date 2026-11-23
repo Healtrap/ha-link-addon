@@ -1,5 +1,5 @@
 name: HA Beacon
-version: "0.1.0"
+version: "0.1.1"
 slug: ha_beacon
 description: Publishes a small house-status heartbeat to a domain file, independent of the relay VPS
 url: https://github.com/Healtrap/ha-link-addon
@@ -12,10 +12,12 @@ init: false
 watchdog: http://[HOST]:[PORT:8097]/health
 ingress: true
 ingress_port: 8097
+panel: true
 panel_icon: mdi:access-point-network
 panel_title: HA Beacon
 hassio_api: true
 hassio_role: default
+homeassistant_api: true
 image: ghcr.io/healtrap/ha-link-addon/ha_beacon-{arch}
 options:
   interval_minutes: 5

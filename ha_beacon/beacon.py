@@ -223,8 +223,12 @@ class HealthHandler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
             age = None if last_ok is None else int(time.time() - last_ok)
-            fresh = last_ok is not None and age is not None and age < interval * 3
-            grace = time.time() - started_at < interval * 2
+            # Не дёргаем перезапуск из-за пары неудачных попыток: считаем
+            # маячок сломанным, только если публикации нет дольше
+            # max(3 интервала, 30 минут).
+            stale_after = max(interval * 3, 1800)
+            fresh = last_ok is not None and age is not None and age < stale_after
+            grace = time.time() - started_at < stale_after
             code = 200 if (fresh or grace) else 503
             body = json.dumps(
                 {
