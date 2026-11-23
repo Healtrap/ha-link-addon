@@ -1,5 +1,5 @@
-name: HA Beacon
-version: "0.1.1"
+﻿name: HA Beacon
+version: "0.1.2"
 slug: ha_beacon
 description: Publishes a small house-status heartbeat to a domain file, independent of the relay VPS
 url: https://github.com/Healtrap/ha-link-addon

@@ -10,9 +10,11 @@ import io
 import json
 import os
 import signal
+import ssl
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from ftplib import FTP
@@ -21,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 OPTIONS_PATH = "/data/options.json"
 HEALTH_PORT = 8097
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
+RELAY_URL = os.environ.get("RELAY_URL", "https://ha.virvinsky.ru:8443/api/")
 
 TEMPS = {
     "d01": "sensor.sensor_d01_temperatura",
@@ -89,6 +92,21 @@ def num(value, digits=1):
         return None
 
 
+def relay_online():
+    """Проверяет, живой ли релей (VPS/туннель) — независимо от FTP и HA."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(RELAY_URL, headers={"User-Agent": "ha-beacon"})
+    try:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            return resp.status in (200, 401, 403)
+    except urllib.error.HTTPError as error:
+        return error.code in (200, 401, 403)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def build_payload():
     states = api_get("/core/api/states")
     by_id = {item.get("entity_id"): item for item in states}
@@ -136,13 +154,17 @@ def build_payload():
 
     try:
         addons = api_get("/addons")
-        by_slug = {a.get("slug"): a for a in addons.get("addons", [])}
-        payload["a"] = {
-            key: (by_slug.get(slug) or {}).get("state", "?")
-            for key, slug in ADDONS.items()
-        }
+        items = addons.get("addons") if isinstance(addons, dict) else addons
+        if isinstance(items, list):
+            by_slug = {a.get("slug"): a for a in items if isinstance(a, dict)}
+            payload["a"] = {
+                key: (by_slug.get(slug) or {}).get("state", "?")
+                for key, slug in ADDONS.items()
+            }
     except Exception:  # noqa: BLE001
         pass
+
+    payload["r"] = 1 if relay_online() else 0
 
     if critical:
         payload["c"] = critical
