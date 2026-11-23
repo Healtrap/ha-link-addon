@@ -20,7 +20,7 @@ hassio_role: default
 homeassistant_api: true
 image: ghcr.io/healtrap/ha-link-addon/ha_beacon-{arch}
 options:
-  interval_minutes: 5
+  interval_minutes: 10
   ftp_host: vh330.timeweb.ru
   ftp_user: ""
   ftp_pass: ""
