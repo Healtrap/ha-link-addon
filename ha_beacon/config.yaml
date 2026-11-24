@@ -1,7 +1,7 @@
 ﻿name: HA Beacon
-version: "0.1.3"
+version: "0.2.0"
 slug: ha_beacon
-description: Publishes a small house-status heartbeat to a domain file, independent of the relay VPS
+description: Publishes a small house-status heartbeat to a domain file and applies remote heating commands, independent of the relay VPS
 url: https://github.com/Healtrap/ha-link-addon
 arch:
   - aarch64
@@ -21,6 +21,7 @@ homeassistant_api: true
 image: ghcr.io/healtrap/ha-link-addon/ha_beacon-{arch}
 options:
   interval_minutes: 10
+  command_poll_seconds: 60
   ftp_host: vh330.timeweb.ru
   ftp_user: ""
   ftp_pass: ""
@@ -28,6 +29,7 @@ options:
   public_url: https://virvinsky.ru/ha/beacon.json
 schema:
   interval_minutes: int(1,60)
+  command_poll_seconds: int(20,600)
   ftp_host: str
   ftp_user: str
   ftp_pass: password

@@ -2,6 +2,9 @@ configuration:
   interval_minutes:
     name: Интервал публикации (минуты)
     description: Как часто отправлять статус дома в файл на домене.
+  command_poll_seconds:
+    name: Интервал проверки команд (секунды)
+    description: Как часто проверять файл command.json на хостинге и применять его.
   ftp_host:
     name: FTP-хост
     description: FTP-сервер хостинга для beacon.json.

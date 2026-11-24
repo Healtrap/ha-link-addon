@@ -2,6 +2,9 @@ configuration:
   interval_minutes:
     name: Publish interval (minutes)
     description: How often to send the heartbeat to the domain file.
+  command_poll_seconds:
+    name: Command check interval (seconds)
+    description: How often to look for command.json on the hosting and apply it.
   ftp_host:
     name: FTP host
     description: Hosting FTP server for beacon.json.

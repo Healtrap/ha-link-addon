@@ -4,8 +4,13 @@
 Работает внутри аддона Home Assistant, использует SUPERVISOR_TOKEN для доступа
 к API ядра. Раз в interval_minutes пишет beacon.json на хостинг и обновляет
 локальный heartbeat. Отдаёт /health для watchdog Supervisor.
+
+Дополнительно (с 0.2.0) следит за файлом command.json в том же каталоге на
+хостинге: если он появился — применяет режимы отопления и удаляет файл, чтобы
+команда сработала ровно один раз. Результат пишется в command_result.json.
 """
 
+import ftplib
 import io
 import json
 import os
@@ -24,6 +29,9 @@ OPTIONS_PATH = "/data/options.json"
 HEALTH_PORT = 8097
 SUPERVISOR_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 RELAY_URL = os.environ.get("RELAY_URL", "https://ha.virvinsky.ru:8443/api/")
+COMMAND_FILE = "command.json"
+RESULT_FILE = "command_result.json"
+LAST_COMMAND_PATH = "/data/last_command.json"
 
 TEMPS = {
     "d01": "sensor.sensor_d01_temperatura",
@@ -56,13 +64,43 @@ BATTERIES = {
 POWER = {"r05": "sensor.socket_r05_moshchnost"}
 ADDONS = {"link": "ha_link", "control": "ha_control"}
 
+# Зоны отопления и их режимы. Ключи режимов фиксированы: day / night / prog.
+ZONES = {
+    "house": {
+        "day": "automation.otoplenie_doma_vkl_1_etazh",
+        "night": "automation.avariinyi_rezhim_nochnoi_kotel_bez_datchikov",
+        "prog": "automation.otoplenie_doma_vkl_postoiannyi_progrev",
+    },
+    "boiler": {
+        "day": "automation.otoplenie_doma_vkl_kotelnaia",
+        "night": "automation.kotelnaia_postoiannyi_nochnoi_progrev_bez_datchika",
+        "prog": "automation.kotelnaia_vkl_postoiannyi_progrev",
+    },
+    "bath1": {
+        "day": "automation.otoplenie_bani_vykl_1_etazh",
+        "night": "automation.bania_1_i_etazh_postoiannyi_nochnoi_progrev_bez_datchika",
+        "prog": "automation.bania_1_i_etazh_vkl_postoiannyi_progrev",
+    },
+    "bath2": {
+        "day": "automation.otoplenie_bani_vkl_podval",
+        "night": "automation.bania_podval_postoiannyi_nochnoi_progrev_bez_datchika",
+        "prog": "automation.bania_podval_vkl_postoiannyi_progrev",
+    },
+}
+ZONE_MODES = ("day", "night", "prog", "off")
+
 started_at = time.time()
 state_lock = threading.Lock()
 state = {"last_ok": None, "last_error": None, "payload": None}
+wake = threading.Event()
 
 
 def log(message):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {message}", flush=True)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def load_options():
@@ -83,6 +121,24 @@ def api_get(path):
     )
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def service_call(service, entity_ids):
+    """POST /core/api/services/<service> для одной или нескольких сущностей."""
+    if isinstance(entity_ids, str):
+        entity_ids = [entity_ids]
+    body = json.dumps({"entity_id": entity_ids}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://supervisor/core/api/services/{service}",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {SUPERVISOR_TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.status
 
 
 def num(value, digits=1):
@@ -120,6 +176,19 @@ def relay_online(attempts=3, delay=3):
     return False
 
 
+def zone_modes(st):
+    """Текущий режим каждой зоны: day / night / prog / off."""
+    result = {}
+    for zone, modes in ZONES.items():
+        current = "off"
+        for mode, entity_id in modes.items():
+            if st(entity_id) == "on":
+                current = mode
+                break
+        result[zone] = current
+    return result
+
+
 def build_payload():
     states = api_get("/core/api/states")
     by_id = {item.get("entity_id"): item for item in states}
@@ -129,7 +198,7 @@ def build_payload():
 
     payload = {
         "schema": 1,
-        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": now_iso(),
         "up": int(time.time() - started_at),
     }
 
@@ -151,6 +220,7 @@ def build_payload():
 
     payload["on"] = {k: 1 if st(e) == "on" else 0 for k, e in SWITCHES.items()}
     payload["m"] = {k: 1 if st(e) == "on" else 0 for k, e in MODES.items()}
+    payload["z"] = zone_modes(st)
 
     batteries = {}
     for key, entity_id in BATTERIES.items():
@@ -184,7 +254,7 @@ def build_payload():
     return payload
 
 
-def publish(payload, options):
+def ftp_connect(options):
     host = options.get("ftp_host") or "vh330.timeweb.ru"
     user = options.get("ftp_user") or ""
     password = options.get("ftp_pass") or ""
@@ -193,19 +263,57 @@ def publish(payload, options):
     if not user or not password:
         raise RuntimeError("ftp_user/ftp_pass не заданы в настройках аддона")
 
+    ftp = FTP(host, timeout=25)
+    ftp.login(user, password)
+    ftp.cwd(path)
+    return ftp
+
+
+def ftp_close(ftp):
+    try:
+        ftp.quit()
+    except Exception:  # noqa: BLE001
+        try:
+            ftp.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def ftp_upload(ftp, name, body):
+    ftp.storbinary(f"STOR {name}", io.BytesIO(body))
+
+
+def ftp_read(ftp, name):
+    """Читает файл; None, если файла нет."""
+    buffer = io.BytesIO()
+    try:
+        ftp.retrbinary(f"RETR {name}", buffer.write)
+    except ftplib.error_perm as error:
+        if str(error).startswith("550"):
+            return None
+        raise
+    return buffer.getvalue()
+
+
+def ftp_delete(ftp, name):
+    try:
+        ftp.delete(name)
+        return True
+    except ftplib.error_perm as error:
+        if str(error).startswith("550"):
+            return False
+        raise
+
+
+def publish(payload, options):
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
-    ftp = FTP(host, timeout=25)
+    ftp = ftp_connect(options)
     try:
-        ftp.login(user, password)
-        ftp.cwd(path)
-        ftp.storbinary("STOR beacon.json", io.BytesIO(body))
+        ftp_upload(ftp, "beacon.json", body)
     finally:
-        try:
-            ftp.quit()
-        except Exception:  # noqa: BLE001
-            ftp.close()
+        ftp_close(ftp)
     return len(body)
 
 
@@ -236,11 +344,138 @@ def publish_once(options):
         return False
 
 
+def read_last_command():
+    try:
+        with open(LAST_COMMAND_PATH, encoding="utf-8") as fh:
+            return str(json.load(fh).get("id") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def write_last_command(command_id):
+    try:
+        with open(LAST_COMMAND_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"id": command_id, "ts": now_iso()}, fh)
+    except Exception as error:  # noqa: BLE001
+        log(f"last command write failed: {error}")
+
+
+def apply_command(command):
+    """Применяет команду. Возвращает (applied, errors)."""
+    applied = {}
+    errors = []
+
+    if not isinstance(command, dict):
+        return applied, ["команда должна быть объектом"]
+
+    spec = command.get("set")
+    if not isinstance(spec, dict) or not spec:
+        return applied, ["в команде нет блока set"]
+
+    for zone, raw_mode in spec.items():
+        modes = ZONES.get(zone)
+        if not modes:
+            errors.append(f"неизвестная зона: {zone}")
+            continue
+        mode = str(raw_mode).strip().lower()
+        if mode not in ZONE_MODES:
+            errors.append(f"{zone}: неизвестный режим «{raw_mode}»")
+            continue
+        off_ids = [entity for name, entity in modes.items() if name != mode]
+        try:
+            if off_ids:
+                service_call("automation/turn_off", off_ids)
+            if mode != "off":
+                service_call("automation/turn_on", modes[mode])
+            applied[zone] = mode
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"{zone}: {error}")
+
+    return applied, errors
+
+
+def upload_result(ftp, result):
+    body = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    ftp_upload(ftp, RESULT_FILE, body)
+
+
+def process_commands(options):
+    ftp = ftp_connect(options)
+    try:
+        raw = ftp_read(ftp, COMMAND_FILE)
+        if raw is None:
+            return False
+
+        result = {
+            "schema": 1,
+            "ts": now_iso(),
+            "id": "",
+            "ok": False,
+            "applied": {},
+            "errors": [],
+        }
+        try:
+            command = json.loads(raw.decode("utf-8"))
+        except Exception as error:  # noqa: BLE001
+            result["errors"] = [f"не разобрать JSON: {error}"]
+            upload_result(ftp, result)
+            ftp_delete(ftp, COMMAND_FILE)
+            log(f"command rejected: {result['errors']}")
+            return True
+
+        command_id = str(command.get("id") or command.get("ts") or "")
+        result["id"] = command_id
+
+        if command_id and command_id == read_last_command():
+            # Уже применяли ранее, а файл остался (например, не удалился) —
+            # повторно не применяем, просто убираем.
+            ftp_delete(ftp, COMMAND_FILE)
+            log(f"command {command_id} already applied, file removed")
+            return False
+
+        applied, errors = apply_command(command)
+        result["applied"] = applied
+        result["errors"] = errors
+        result["ok"] = bool(applied) and not errors
+
+        if command_id:
+            write_last_command(command_id)
+        upload_result(ftp, result)
+        ftp_delete(ftp, COMMAND_FILE)
+
+        log(f"command {command_id}: applied={applied} errors={errors}")
+        if applied:
+            # Дать HA пару секунд обновить состояния и сразу опубликовать отчёт.
+            time.sleep(3)
+            wake.set()
+        return True
+    finally:
+        ftp_close(ftp)
+
+
+def command_loop(options):
+    interval = max(20, min(600, int(options.get("command_poll_seconds") or 60)))
+    log(f"command polling every {interval}s")
+    while True:
+        try:
+            process_commands(options)
+        except Exception as error:  # noqa: BLE001
+            log(f"command check failed: {error}")
+        time.sleep(interval)
+
+
 def loop(options):
     interval = max(1, min(60, int(options.get("interval_minutes") or 5))) * 60
     while True:
         ok = publish_once(options)
-        time.sleep(interval if ok else 60)
+        if ok:
+            wake.wait(interval)
+            wake.clear()
+        else:
+            wake.wait(60)
+            wake.clear()
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -298,6 +533,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def main():
     options = load_options()
     threading.Thread(target=loop, args=(options,), daemon=True).start()
+    threading.Thread(target=command_loop, args=(options,), daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler)
     log(f"health server on :{HEALTH_PORT}")
